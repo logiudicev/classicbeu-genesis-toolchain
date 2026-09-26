@@ -365,6 +365,24 @@ build_sgdk_lib() {
         || die "SGDK library build produced no libmd.a / libmd_debug.a"
 }
 
+# check_rom <rom file> <label>
+# Checks a finished ROM: it exists, its size is a multiple of SGDK's padding,
+# and its header starts with the Mega Drive signature. <label> names the ROM
+# in the success and error messages.
+check_rom() {
+    local rom="$1" label="$2"
+    [[ -f "${rom}" ]] || die "${label}: no ROM produced"
+    local size
+    size="$(wc -c < "${rom}" | tr -d ' ')"
+    (( size > 0 && size % SGDK_ROM_ALIGN == 0 )) \
+        || die "${label}: ROM size ${size} is not a multiple of ${SGDK_ROM_ALIGN}"
+    local magic
+    magic="$(dd if="${rom}" bs=1 skip="${MD_HEADER_OFFSET}" count="${#MD_HEADER_MAGIC}" 2>/dev/null)"
+    [[ "${magic}" == "${MD_HEADER_MAGIC}" ]] \
+        || die "${label}: ROM header is '${magic}', expected '${MD_HEADER_MAGIC}'"
+    log "verified: ${label} (${size} bytes, header OK)"
+}
+
 # End-to-end proof: an empty project folder makes SGDK generate its own
 # hello-world main.c, which we build into a real ROM and sanity-check.
 verify_sgdk_rom() {
@@ -375,17 +393,7 @@ verify_sgdk_rom() {
     run_logged "verify-rom-${config}" "${dir}" \
         make -f "${stage}/makefile.gen" GDK="${stage}" PREFIX="${TARGET}-" "${config}"
 
-    local rom="${dir}/out/rom.bin"
-    [[ -f "${rom}" ]] || die "${config} build produced no out/rom.bin"
-    local size
-    size="$(wc -c < "${rom}" | tr -d ' ')"
-    (( size > 0 && size % SGDK_ROM_ALIGN == 0 )) \
-        || die "${config} ROM size ${size} is not a multiple of ${SGDK_ROM_ALIGN}"
-    local magic
-    magic="$(dd if="${rom}" bs=1 skip="${MD_HEADER_OFFSET}" count="${#MD_HEADER_MAGIC}" 2>/dev/null)"
-    [[ "${magic}" == "${MD_HEADER_MAGIC}" ]] \
-        || die "${config} ROM header is '${magic}', expected '${MD_HEADER_MAGIC}'"
-    log "verified: ${config} ROM builds (${size} bytes, header OK)"
+    check_rom "${dir}/out/rom.bin" "${config} ROM builds"
 }
 
 # ── package ─────────────────────────────────────────────────────────────────
@@ -447,6 +455,38 @@ write_manifest() {
 MANIFEST
 }
 
+# verify_bundle <bundle folder> <host>
+# Proves the bundle works on its own, in two stages:
+#  1. The bundle's GCC finds its own internal files inside the bundle. GCC
+#     was installed into work/stage and then copied; if it still looked in
+#     work/stage, the ROM build below would pass here but fail on every
+#     other machine. These queries print where GCC really looks.
+#  2. SGDK's hello-world ROM builds using only the bundle's compiler, SGDK
+#     and Java. PATH is replaced for that one command: bundle folders first,
+#     then /usr/bin and /bin only so make and basic commands still exist.
+verify_bundle() {
+    local root="$1" host="$2"
+    local gcc_bin="${root}/gcc/bin/${TARGET}-gcc" query found
+    for query in -print-libgcc-file-name -print-prog-name=cc1 \
+                 -print-prog-name=ld -print-prog-name=lto-wrapper; do
+        found="$("${gcc_bin}" "${query}")"
+        [[ "${found}" == "${root}/"* ]] \
+            || die "bundle GCC resolves ${query} to '${found}', which is outside the bundle"
+    done
+    log "verified: bundle GCC finds its own files inside the bundle"
+
+    local java_exe java_bin_dir
+    java_exe="$(java_exe_for "${host}")"
+    java_bin_dir="$(dirname "${root}/${java_exe}")"
+    local dir="${WORK_DIR}/verify-bundle"
+    rm -rf "${dir}"
+    mkdir -p "${dir}"
+    run_logged verify-bundle "${dir}" \
+        env PATH="${root}/gcc/bin:${root}/sgdk/bin:${java_bin_dir}:/usr/bin:/bin" \
+        make -f "${root}/sgdk/makefile.gen" GDK="${root}/sgdk" PREFIX="${TARGET}-" release
+    check_rom "${dir}/out/rom.bin" "ROM built from the bundle alone"
+}
+
 step_package() {
     local host="${HOST_OS}-${HOST_ARCH}"
     is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
@@ -469,6 +509,7 @@ step_package() {
     local java_exe
     java_exe="$(java_exe_for "${host}")"
     write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}"
+    verify_bundle "${root}" "${host}"
     log "bundle folder ready: work/bundle/${name}"
 }
 
