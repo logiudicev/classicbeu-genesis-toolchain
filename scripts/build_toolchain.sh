@@ -397,9 +397,11 @@ verify_sgdk_rom() {
 }
 
 # ── package ─────────────────────────────────────────────────────────────────
-# Assembles this machine's toolchain into one folder with a fixed layout:
+# Assembles this machine's toolchain into one folder with a fixed layout,
 #   gcc/   the 68000 compiler      sgdk/   SGDK      java/   Java
+# checks it works on its own, then compresses it into out/ for release.
 readonly BUNDLE_DIR="${WORK_DIR}/bundle"
+readonly OUT_DIR="${REPO_ROOT}/out"
 
 bundle_name() { printf 'classicbeu-genesis-%s-%s' "${TOOLCHAIN_ID}" "$1"; }
 
@@ -487,7 +489,16 @@ verify_bundle() {
     check_rom "${dir}/out/rom.bin" "ROM built from the bundle alone"
 }
 
+# write_checksum <archive>
+# Writes <archive>.sha256 beside it, in the same "<hash>  <file name>" format
+# as checksums.sha256, so anyone can check a download with sha256sum -c.
+write_checksum() {
+    local archive="$1"
+    ( cd "$(dirname "${archive}")" && "${SHA256[@]}" "$(basename "${archive}")" ) > "${archive}.sha256"
+}
+
 step_package() {
+    require_tools tar xz
     local host="${HOST_OS}-${HOST_ARCH}"
     is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
     step_fetch
@@ -511,6 +522,13 @@ step_package() {
     write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}"
     verify_bundle "${root}" "${host}"
     log "bundle folder ready: work/bundle/${name}"
+    mkdir -p "${OUT_DIR}"
+    local archive="${OUT_DIR}/${name}.tar.xz"
+    rm -f "${archive}" "${archive}.sha256"
+    log "compressing out/${name}.tar.xz (takes a minute or two)"
+    tar -C "${BUNDLE_DIR}" -cJf "${archive}" "${name}"
+    write_checksum "${archive}"
+    log "package finished: out/${name}.tar.xz"
 }
 
 # ── clean ───────────────────────────────────────────────────────────────────
