@@ -1,66 +1,52 @@
 # classicbeu-genesis-toolchain
 
-Builds the pinned Genesis toolchain used by the ClassicBEU editor:
-SGDK 2.11, GCC 13.2 for the 68000, and a portable Java.
+Builds the Genesis toolchain for the ClassicBEU editor:
+SGDK 2.11 + GCC 13.2 (68000) + portable Java.
+Finished bundles land in `out/`.
 
-Everything downloaded is listed in `versions.env` and pinned by checksum in
-`checksums.sha256`. All build output goes to `work/`, which is not committed.
+## Arch Linux
 
-## Prerequisites (Arch Linux, one time)
+One-time setup:
 
 ```bash
 sudo pacman -S --needed base-devel texinfo jre-openjdk-headless
 ```
 
-- `base-devel`, `texinfo`: needed to build GCC.
-- `jre-openjdk-headless`: SGDK's tools run on Java during `build-sgdk`.
+Build (run from the repo root, in order):
 
-## Build
+| Command | Time | Success line |
+|---|---|---|
+| `./scripts/build_toolchain.sh fetch` | ~1 min | `all sources verified on linux-x64` |
+| `./scripts/build_toolchain.sh build-gcc` | 10–25 min | `verified: 13.2.0 targets m68k-elf, LTO + libgcc OK` |
+| `./scripts/build_toolchain.sh build-sgdk` | ~1 min | `verified: debug ROM builds (131072 bytes, header OK)` |
+| `./scripts/build_toolchain.sh package` | few min | `package finished: out/...-linux-x64.tar.xz` |
 
-Run from the repo root, in order. Every step can be re-run safely;
-finished parts are skipped.
+Every step is safe to re-run. On failure, the error and log path are printed.
 
-1. **Download and verify sources**
-   `./scripts/build_toolchain.sh fetch`
-   Success: one `OK` per file, then `all sources verified on linux-x64`.
+## macOS
 
-2. **Build the 68000 compiler** (10–25 minutes)
-   `./scripts/build_toolchain.sh build-gcc`
-   Success: `verified: 13.2.0 targets m68k-elf, LTO + libgcc OK`
+Not built locally yet. The Mac bundle will be built by the GitHub Action;
+this section gets filled in once that's verified.
 
-3. **Build SGDK and test ROMs** (about 1 minute)
-   `./scripts/build_toolchain.sh build-sgdk`
-   Success:
-   `verified: release ROM builds (131072 bytes, header OK)`
-   `verified: debug ROM builds (131072 bytes, header OK)`
+## Windows
 
-If a step fails, it prints the error lines and the path to its full log
-in `work/logs/`.
+Nothing to run. The Windows bundle is made on Linux, and the editor
+downloads it.
 
-## Changing a pinned version (rare)
+## Reference
 
-Only when upgrading SGDK, GCC or Java, or adding a new download:
+**Reset:** `./scripts/build_toolchain.sh clean` wipes `work/` except
+downloads, including the compiler (next `build-gcc` takes the full time).
+`out/` is kept.
 
-1. Edit `versions.env`.
-2. Delete `checksums.sha256`.
-3. `./scripts/build_toolchain.sh fetch --record` downloads everything and
-   writes a new `checksums.sha256`.
-4. Where the publisher lists checksums (Adoptium does, for Java), compare.
-5. Commit `versions.env` and `checksums.sha256` together.
-6. If GCC or SGDK changed: `./scripts/build_toolchain.sh clean`, then run
-   the Build steps again.
+**Upgrading SGDK / GCC / Java:** edit `versions.env`, delete
+`checksums.sha256`, run `fetch --record`, update the copy below, commit.
+Then `clean` and rebuild.
 
-## Starting over
+**Bundle contents:** `gcc/`, `sgdk/`, `java/`, and `toolchain.json`,
+which tells the editor where each tool is.
 
-`./scripts/build_toolchain.sh clean` deletes everything in `work/` except
-the downloads, **including the built compiler**, so `build-gcc` takes the
-full 10–25 minutes again.
-
-## Pinned checksums (reference copy)
-
-The live list is `checksums.sha256` — that is what the script checks.
-This copy is for reading only and must be updated by hand whenever
-`checksums.sha256` changes.
+**Pinned checksums** (copy of `checksums.sha256`, which is what the script checks):
 
 ```
 ae9a5789e23459e59606e6714723f2d3ffc31c03174191ef0d015bdf06007450  binutils-2.41.tar.xz
