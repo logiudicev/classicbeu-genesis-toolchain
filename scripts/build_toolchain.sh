@@ -533,9 +533,10 @@ step_package() {
 
 # ── clean ───────────────────────────────────────────────────────────────────
 step_clean() {
-    log "removing work/ (keeping work/downloads)"
+    log "removing work/ except work/downloads (out/ is not touched)"
     rm -rf "${SRC_DIR}" "${BUILD_DIR}" "${LOG_DIR}" "${STAMP_DIR}" \
-           "${WORK_DIR}/stage" "${WORK_DIR}"/verify*
+           "${WORK_DIR}/stage" "${WORK_DIR}"/verify* \
+           "${BUNDLE_DIR}" "${WORK_DIR}/jre-unpack"
 }
 
 # ── Entry point ─────────────────────────────────────────────────────────────
