@@ -5,6 +5,7 @@
 #   scripts/build_toolchain.sh fetch [--record]  download + verify the pinned sources
 #   scripts/build_toolchain.sh build-gcc         build binutils + GCC for the 68000
 #   scripts/build_toolchain.sh build-sgdk        build SGDK's tools + library, then a test ROM
+#   scripts/build_toolchain.sh package           assemble this machine's bundle folder
 #   scripts/build_toolchain.sh clean             delete work/ except downloads
 #
 # Each step can be re-run safely: finished sub-steps are remembered in
@@ -417,6 +418,35 @@ unpack_jre() {
     rm -rf "${tmp}"
 }
 
+# Where the java executable sits inside a bundle, per host. The macOS
+# Java is packaged app-style, so its binary is under Contents/Home.
+java_exe_for() {
+    case "$1" in
+        linux-*)   printf 'java/bin/java' ;;
+        macos-*)   printf 'java/Contents/Home/bin/java' ;;
+        windows-*) printf 'java/bin/java.exe' ;;
+        *)         die "unknown host $1" ;;
+    esac
+}
+
+# write_manifest <bundle folder> <host> <compiler bin dir> <tool prefix> <java exe>
+# Writes toolchain.json: the editor's map of this bundle. Every path is
+# relative to the bundle folder and uses forward slashes on every OS.
+write_manifest() {
+    local root="$1" host="$2" gcc_bin="$3" prefix="$4" java_exe="$5"
+    cat > "${root}/toolchain.json" <<MANIFEST
+{
+  "schema": ${TOOLCHAIN_MANIFEST_SCHEMA},
+  "id": "${TOOLCHAIN_ID}",
+  "host": "${host}",
+  "sgdk": { "version": "${SGDK_TAG#v}", "dir": "sgdk" },
+  "gcc":  { "version": "${GCC_VERSION}", "binDir": "${gcc_bin}", "prefix": "${prefix}",
+            "target": "${TARGET}", "cpu": "${TARGET_CPU}" },
+  "java": { "version": "${JRE_VERSION}", "exe": "${java_exe}" }
+}
+MANIFEST
+}
+
 step_package() {
     local host="${HOST_OS}-${HOST_ARCH}"
     is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
@@ -436,6 +466,9 @@ step_package() {
     rm -rf "${root}/gcc/share"   # manual pages only; not needed to compile
     cp -R "${STAGE_DIR}/sgdk" "${root}/sgdk"
     unpack_jre "${host}" "${root}"
+    local java_exe
+    java_exe="$(java_exe_for "${host}")"
+    write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}"
     log "bundle folder ready: work/bundle/${name}"
 }
 
@@ -452,11 +485,12 @@ main() {
     local step="${1:-}"
     [[ $# -gt 0 ]] && shift
     case "${step}" in
-        fetch)     step_fetch "$@" ;;
-        build-gcc) step_build_gcc "$@" ;;
+        fetch)      step_fetch "$@" ;;
+        build-gcc)  step_build_gcc "$@" ;;
         build-sgdk) step_build_sgdk "$@" ;;
-        clean)     step_clean ;;
-        *)          die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | clean" ;;
+        package)    step_package ;;
+        clean)      step_clean ;;
+        *)          die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | package | clean" ;;
     esac
 }
 
