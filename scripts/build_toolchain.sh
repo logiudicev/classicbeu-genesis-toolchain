@@ -387,6 +387,58 @@ verify_sgdk_rom() {
     log "verified: ${config} ROM builds (${size} bytes, header OK)"
 }
 
+# ── package ─────────────────────────────────────────────────────────────────
+# Assembles this machine's toolchain into one folder with a fixed layout:
+#   gcc/   the 68000 compiler      sgdk/   SGDK      java/   Java
+readonly BUNDLE_DIR="${WORK_DIR}/bundle"
+
+bundle_name() { printf 'classicbeu-genesis-%s-%s' "${TOOLCHAIN_ID}" "$1"; }
+
+# Which pinned Java archive belongs to a host. Unknown hosts fail loudly.
+jre_file_for() {
+    case "$1" in
+        linux-x64)   printf '%s' "${JRE_FILE_LINUX_X64}" ;;
+        macos-arm64) printf '%s' "${JRE_FILE_MACOS_ARM64}" ;;
+        windows-x64) printf '%s' "${JRE_FILE_WINDOWS_X64}" ;;
+        *)           die "no Java pinned for host $1 (add one to versions.env)" ;;
+    esac
+}
+
+# unpack_jre <host> <bundle folder>  ->  <bundle folder>/java
+unpack_jre() {
+    local host="$1" root="$2" file
+    file="$(jre_file_for "${host}")"
+    local tmp="${WORK_DIR}/jre-unpack"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    tar -xf "${DOWNLOAD_DIR}/${file}" -C "${tmp}"
+    [[ -d "${tmp}/${JRE_TOP_DIR}" ]] || die "${file} did not unpack to ${JRE_TOP_DIR}/"
+    mv "${tmp}/${JRE_TOP_DIR}" "${root}/java"
+    rm -rf "${tmp}"
+}
+
+step_package() {
+    local host="${HOST_OS}-${HOST_ARCH}"
+    is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
+    step_fetch
+
+    local name root entry
+    name="$(bundle_name "${host}")"
+    root="${BUNDLE_DIR}/${name}"
+    log "assembling ${name}"
+    rm -rf "${root}"
+    mkdir -p "${root}/gcc"
+    # Everything GCC installed into the stage, except the sgdk folder.
+    for entry in "${STAGE_DIR}"/*; do
+        [[ "$(basename "${entry}")" == "sgdk" ]] && continue
+        cp -R "${entry}" "${root}/gcc/"
+    done
+    rm -rf "${root}/gcc/share"   # manual pages only; not needed to compile
+    cp -R "${STAGE_DIR}/sgdk" "${root}/sgdk"
+    unpack_jre "${host}" "${root}"
+    log "bundle folder ready: work/bundle/${name}"
+}
+
 # ── clean ───────────────────────────────────────────────────────────────────
 step_clean() {
     log "removing work/ (keeping work/downloads)"
