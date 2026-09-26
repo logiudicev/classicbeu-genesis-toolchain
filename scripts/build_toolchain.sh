@@ -80,7 +80,9 @@ mark_done() { mkdir -p "${STAMP_DIR}"; touch "${STAMP_DIR}/$1"; }
 
 # run_logged <name> <dir> <command...>
 # Runs the command inside <dir> with all output going to work/logs/<name>.log.
-# On failure, prints the tail of that log so the terminal stays readable.
+# On failure, shows the ERROR lines first (with line numbers), then a short
+# tail. Parallel builds (make -j) keep printing after the real failure, so
+# the tail alone usually shows the wrong thing.
 run_logged() {
     local name="$1" dir="$2"
     shift 2
@@ -88,9 +90,12 @@ run_logged() {
     mkdir -p "${LOG_DIR}"
     log "  ${name}  (log: work/logs/${name}.log)"
     if ! ( cd "${dir}" && "$@" ) >"${log_file}" 2>&1; then
-        printf '\n----- last 40 lines of %s -----\n' "${log_file}" >&2
-        tail -n 40 "${log_file}" >&2
-        die "${name} failed"
+        printf '\n----- error lines in %s -----\n' "${log_file}" >&2
+        grep -n -E "error:|Error [0-9]+|\*\*\*" "${log_file}" | head -n 30 >&2 \
+            || printf '(no lines matched; see the tail below)\n' >&2
+        printf '\n----- last 15 lines -----\n' >&2
+        tail -n 15 "${log_file}" >&2
+        die "${name} failed -- full log: work/logs/${name}.log"
     fi
 }
 
@@ -160,10 +165,12 @@ step_build_gcc() {
     step_fetch
 
     # Host-side compiler flags (these build the COMPILER, not Genesis code).
-    # -std=gnu17: newer host compilers default to C23, which older GCC and
-    # binutils sources were not written for. Pinning the dialect avoids that.
+    # Pin BOTH language dialects to what GCC 13.2's sources were written for.
+    # Newer host compilers change the defaults (C23 in GCC 15, C++20 in GCC 16)
+    # and those break older sources. C++ must be exactly gnu++11: libcody's
+    # configure rejects anything else (it checks __cplusplus == 201103).
     export CFLAGS="-O2 -std=gnu17"
-    export CXXFLAGS="-O2 -std=gnu++17"
+    export CXXFLAGS="-O2 -std=gnu++11"
     export LDFLAGS="${HOST_LDFLAGS}"
     # GCC's build must find the m68k binutils we install first.
     export PATH="${STAGE_DIR}/bin:${PATH}"
@@ -243,8 +250,13 @@ verify_gcc() {
     rm -rf "${dir}"
     mkdir -p "${dir}"
     cat > "${dir}/probe.c" <<'PROBE'
-int square(int x) { return x * x; }
-void entry(void) { volatile int r = square(7); (void)r; }
+
+/* volatile: the compiler must read these at runtime, so it cannot
+   pre-compute the multiply -- the 68000 then needs libgcc's __mulsi3. */
+
+volatile int probe_input = 7;
+volatile int probe_result;
+void entry(void) { probe_result = probe_input * probe_input; }
 PROBE
     run_logged verify-compile "${dir}" "${gcc_bin}" -m68000 -O2 -flto -fuse-linker-plugin \
         -nostdlib -Wl,-e,entry probe.c -o probe.elf -lgcc
