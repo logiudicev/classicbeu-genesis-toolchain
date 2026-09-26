@@ -9,7 +9,7 @@ Finished bundles land in `out/`.
 One-time setup:
 
 ```bash
-sudo pacman -S --needed base-devel texinfo jre-openjdk-headless
+sudo pacman -S --needed base-devel texinfo jre-openjdk-headless zip unzip
 ```
 
 Build (run from the repo root, in order):

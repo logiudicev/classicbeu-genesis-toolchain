@@ -422,7 +422,12 @@ unpack_jre() {
     local tmp="${WORK_DIR}/jre-unpack"
     rm -rf "${tmp}"
     mkdir -p "${tmp}"
-    tar -xf "${DOWNLOAD_DIR}/${file}" -C "${tmp}"
+    # Linux/macOS Java comes as .tar.gz; Windows Java comes as .zip,
+    # which tar cannot open on every system, so it gets unzip.
+    case "${file}" in
+        *.zip) unzip -q "${DOWNLOAD_DIR}/${file}" -d "${tmp}" ;;
+        *)     tar -xf "${DOWNLOAD_DIR}/${file}" -C "${tmp}" ;;
+    esac
     [[ -d "${tmp}/${JRE_TOP_DIR}" ]] || die "${file} did not unpack to ${JRE_TOP_DIR}/"
     mv "${tmp}/${JRE_TOP_DIR}" "${root}/java"
     rm -rf "${tmp}"
@@ -529,6 +534,46 @@ step_package() {
     tar -C "${BUNDLE_DIR}" -cJf "${archive}" "${name}"
     write_checksum "${archive}"
     log "package finished: out/${name}.tar.xz"
+}
+
+# step_package_windows
+# Builds the Windows bundle ON LINUX by repacking SGDK's own Windows build:
+# its bin/ already holds GCC 13.2 for Windows (gcc.exe, cc1.exe, ld.exe...),
+# make.exe and sh.exe, and its lib/ holds libmd.a built with that compiler.
+# We add the Windows Java and toolchain.json. Windows .exe files cannot run
+# here, so this bundle is NOT test-built; the Windows CI job does that.
+step_package_windows() {
+    require_tools zip unzip
+    local host="windows-x64"
+    step_fetch
+    extract "${SGDK_FILE}" "${SGDK_TOP_DIR}"
+    local sgdk_src="${SRC_DIR}/${SGDK_TOP_DIR}"
+
+    local name root item
+    name="$(bundle_name "${host}")"
+    root="${BUNDLE_DIR}/${name}"
+    log "assembling ${name} (repack of SGDK's Windows build)"
+    rm -rf "${root}"
+    mkdir -p "${root}/sgdk"
+    # The same SGDK parts as the Linux bundle, plus SGDK's own bin/ and lib/,
+    # which hold the Windows compiler, tools and prebuilt library.
+    for item in "${SGDK_STAGE_ITEMS[@]}" bin lib; do
+        cp -R "${sgdk_src}/${item}" "${root}/sgdk/"
+    done
+    unpack_jre "${host}" "${root}"
+    local java_exe
+    java_exe="$(java_exe_for "${host}")"
+    # SGDK's Windows compiler lives in sgdk/bin and its tools have no prefix.
+    write_manifest "${root}" "${host}" "sgdk/bin" "" "${java_exe}"
+    log "bundle folder ready: work/bundle/${name}"
+
+    mkdir -p "${OUT_DIR}"
+    local archive="${OUT_DIR}/${name}.zip"
+    rm -f "${archive}" "${archive}.sha256"
+    log "compressing out/${name}.zip"
+    ( cd "${BUNDLE_DIR}" && zip -qr "${archive}" "${name}" )
+    write_checksum "${archive}"
+    log "package-windows finished: out/${name}.zip (NOT test-built; the Windows CI job verifies it)"
 }
 
 # ── clean ───────────────────────────────────────────────────────────────────
