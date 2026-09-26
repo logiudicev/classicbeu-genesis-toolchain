@@ -12,3 +12,12 @@ SGDK toolchain for use with Classic Beat em Up Engine
 
 # commands continued
 * scripts/build_toolchain.sh fetch
+
+# commands (Arch Linux)
+* sudo pacman -S --needed base-devel texinfo
+
+# commands continued
+* scripts/build_toolchain.sh build-gcc
+
+# success will read:
+* verified: 13.2.0 targets m68k-elf, LTO + libgcc OK

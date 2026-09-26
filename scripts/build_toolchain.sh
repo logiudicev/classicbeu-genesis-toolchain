@@ -163,7 +163,7 @@ step_build_gcc() {
     # -std=gnu17: newer host compilers default to C23, which older GCC and
     # binutils sources were not written for. Pinning the dialect avoids that.
     export CFLAGS="-O2 -std=gnu17"
-    export CXXFLAGS="-O2"
+    export CXXFLAGS="-O2 -std=gnu++17"
     export LDFLAGS="${HOST_LDFLAGS}"
     # GCC's build must find the m68k binutils we install first.
     export PATH="${STAGE_DIR}/bin:${PATH}"
