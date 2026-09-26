@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/build_toolchain.sh fetch [--record]  download + verify the pinned sources
 #   scripts/build_toolchain.sh build-gcc         build binutils + GCC for the 68000
+#   scripts/build_toolchain.sh build-sgdk        build SGDK's tools + library, then a test ROM
 #   scripts/build_toolchain.sh clean             delete work/ except downloads
 #
 # Each step can be re-run safely: finished sub-steps are remembered in
@@ -267,11 +268,130 @@ PROBE
     log "verified: $("${gcc_bin}" -dumpversion) targets ${TARGET}, LTO + libgcc OK"
 }
 
+# ── build-sgdk ──────────────────────────────────────────────────────────────
+# What goes into the bundle from the SGDK source tree. Deliberately left out:
+# Windows .exe/.dll files, the prebuilt Windows lib/ (we rebuild it), samples,
+# docs, and the tools' source code (we compile the tools below instead).
+readonly SGDK_STAGE_ITEMS=(inc src res md.ld makefile.gen makelib.gen common.mk
+                           license.txt COPYING.RUNTIME readme.md)
+
+# SGDK pads every ROM to a multiple of this (makefile.gen: sizebnd -sizealign).
+readonly SGDK_ROM_ALIGN=131072
+# Every Mega Drive ROM header starts with this at offset 0x100.
+readonly MD_HEADER_OFFSET=256
+readonly MD_HEADER_MAGIC="SEGA MEGA DRIVE"
+
+step_build_sgdk() {
+    require_tools make cc c++ tar java
+    [[ -x "${STAGE_DIR}/bin/${TARGET}-gcc" ]] \
+        || die "no ${TARGET}-gcc in ${STAGE_DIR}; run build-gcc first"
+
+    # Never build from unverified sources.
+    step_fetch
+
+    extract "${SGDK_FILE}" "${SGDK_TOP_DIR}"
+    local sgdk_src="${SRC_DIR}/${SGDK_TOP_DIR}"
+    local sgdk_stage="${STAGE_DIR}/sgdk"
+    # Our compiler first, then SGDK's host tools (makefile.gen calls sjasm,
+    # bintos and convsym by bare name on Linux/macOS).
+    export PATH="${STAGE_DIR}/bin:${sgdk_stage}/bin:${PATH}"
+
+    if ! is_done sgdk-host-tools; then
+        build_sgdk_host_tools "${sgdk_src}"
+        mark_done sgdk-host-tools
+    fi
+    if ! is_done sgdk; then
+        stage_sgdk "${sgdk_src}" "${sgdk_stage}"
+        build_sgdk_lib "${sgdk_stage}"
+        mark_done sgdk
+    fi
+
+    verify_sgdk_rom "${sgdk_stage}" release
+    verify_sgdk_rom "${sgdk_stage}" debug
+    log "build-sgdk finished: ${sgdk_stage}"
+}
+
+# SGDK's small helper programs, compiled for THIS machine. Each gets its
+# dialect pinned for the same reason as GCC: newer host compilers change the
+# defaults. convsym is the exception that genuinely needs C++20.
+build_sgdk_host_tools() {
+    local tools="$1/tools"
+    local out="${BUILD_DIR}/host-tools"
+    rm -rf "${out}"
+    mkdir -p "${out}"
+    log "SGDK host tools"
+    # Z80 sound-driver assembler + its binary-to-source converter.
+    run_logged tool-sjasm "${out}" c++ -std=gnu++11 -O2 -DMAX_PATH=MAXPATHLEN \
+        ${HOST_LDFLAGS} -o sjasm "${tools}"/sjasm/src/*.cpp
+    run_logged tool-bintos "${out}" cc -std=gnu17 -O2 \
+        ${HOST_LDFLAGS} -o bintos "${tools}/bintos/src/bintos.c"
+    # Legacy XGM music converter (rescomp runs it for XGM resources).
+    run_logged tool-xgmtool "${out}" cc -std=gnu17 -O2 -I"${tools}/xgmtool/inc" \
+        ${HOST_LDFLAGS} -o xgmtool "${tools}"/xgmtool/src/*.c -lm
+    # Debug-symbol injector used by debug ROM builds.
+    run_logged tool-convsym "${out}" c++ -std=c++20 -O2 -I"${tools}/convsym/include" \
+        ${HOST_LDFLAGS} -o convsym "${tools}/convsym/src/main.cpp"
+}
+
+# Copies the parts of SGDK we ship into the stage, plus the host tools.
+# rescomp looks for xgmtool NEXT TO rescomp.jar, so tools go in sgdk/bin.
+stage_sgdk() {
+    local src="$1" stage="$2" item
+    log "staging SGDK into ${stage}"
+    rm -rf "${stage}"
+    mkdir -p "${stage}/bin" "${stage}/lib"
+    for item in "${SGDK_STAGE_ITEMS[@]}"; do
+        cp -R "${src}/${item}" "${stage}/"
+    done
+    cp "${src}"/bin/*.jar "${src}"/bin/*.txt "${stage}/bin/"
+    cp "${BUILD_DIR}"/host-tools/* "${stage}/bin/"
+}
+
+# Rebuilds libmd.a (release) and libmd_debug.a with OUR compiler, using
+# SGDK's own library makefile. Both variants compile to the same .o paths,
+# so object files are cleaned between them and afterwards.
+build_sgdk_lib() {
+    local stage="$1"
+    local mk=(make -f "${stage}/makelib.gen" GDK="${stage}" PREFIX="${TARGET}-")
+    log "SGDK library (release + debug)"
+    run_logged sgdk-lib-release       "${stage}" "${mk[@]}" -j"${JOBS}" release
+    run_logged sgdk-lib-tidy-release  "${stage}" "${mk[@]}" cleanobj cleandep
+    run_logged sgdk-lib-debug         "${stage}" "${mk[@]}" -j"${JOBS}" debug
+    run_logged sgdk-lib-tidy-debug    "${stage}" "${mk[@]}" cleanobj cleandep
+    # sjasm drops its assembly listing in the working directory; not shipped.
+    rm -f "${stage}/out.lst"
+    [[ -f "${stage}/lib/libmd.a" && -f "${stage}/lib/libmd_debug.a" ]] \
+        || die "SGDK library build produced no libmd.a / libmd_debug.a"
+}
+
+# End-to-end proof: an empty project folder makes SGDK generate its own
+# hello-world main.c, which we build into a real ROM and sanity-check.
+verify_sgdk_rom() {
+    local stage="$1" config="$2"
+    local dir="${WORK_DIR}/verify-rom-${config}"
+    rm -rf "${dir}"
+    mkdir -p "${dir}"
+    run_logged "verify-rom-${config}" "${dir}" \
+        make -f "${stage}/makefile.gen" GDK="${stage}" PREFIX="${TARGET}-" "${config}"
+
+    local rom="${dir}/out/rom.bin"
+    [[ -f "${rom}" ]] || die "${config} build produced no out/rom.bin"
+    local size
+    size="$(wc -c < "${rom}" | tr -d ' ')"
+    (( size > 0 && size % SGDK_ROM_ALIGN == 0 )) \
+        || die "${config} ROM size ${size} is not a multiple of ${SGDK_ROM_ALIGN}"
+    local magic
+    magic="$(dd if="${rom}" bs=1 skip="${MD_HEADER_OFFSET}" count="${#MD_HEADER_MAGIC}" 2>/dev/null)"
+    [[ "${magic}" == "${MD_HEADER_MAGIC}" ]] \
+        || die "${config} ROM header is '${magic}', expected '${MD_HEADER_MAGIC}'"
+    log "verified: ${config} ROM builds (${size} bytes, header OK)"
+}
+
 # ── clean ───────────────────────────────────────────────────────────────────
 step_clean() {
     log "removing work/ (keeping work/downloads)"
     rm -rf "${SRC_DIR}" "${BUILD_DIR}" "${LOG_DIR}" "${STAMP_DIR}" \
-           "${WORK_DIR}/stage" "${WORK_DIR}/verify"
+           "${WORK_DIR}/stage" "${WORK_DIR}"/verify*
 }
 
 # ── Entry point ─────────────────────────────────────────────────────────────
@@ -282,8 +402,9 @@ main() {
     case "${step}" in
         fetch)     step_fetch "$@" ;;
         build-gcc) step_build_gcc "$@" ;;
+        build-sgdk) step_build_sgdk "$@" ;;
         clean)     step_clean ;;
-        *)         die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | clean" ;;
+        *)          die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | clean" ;;
     esac
 }
 
