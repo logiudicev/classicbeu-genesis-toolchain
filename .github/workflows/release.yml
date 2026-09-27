@@ -111,3 +111,18 @@ jobs:
           $magic = [System.Text.Encoding]::ASCII.GetString($bytes, [int]$env:MD_HEADER_OFFSET, $env:MD_HEADER_MAGIC.Length)
           if ($magic -ne $env:MD_HEADER_MAGIC) { throw "ROM header is '$magic', expected '$env:MD_HEADER_MAGIC'" }
           Write-Host "verified: Windows ROM built from the bundle alone ($($bytes.Length) bytes, header OK)"
+      
+
+      # TEMPORARY diagnostic (Edit 3b): the same build with the runner's full
+      # PATH, to learn whether "Error 127 (ignored)" comes from the restricted
+      # PATH above. Never fails the job. Removed once we have the answer.
+      - name: "Diagnostic: build with the full PATH"
+        continue-on-error: true
+        run: |
+          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
+          $env:PATH = "$bundle\java\bin;$bundle\sgdk\bin;$env:PATH"
+          New-Item -ItemType Directory rom-test-fullpath | Out-Null
+          Set-Location rom-test-fullpath
+          & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release 2>&1 | Tee-Object -Variable out
+          $found = [bool]($out -match 'Error 127')
+          Write-Host "RESULT: Error 127 with the full PATH: $found"
