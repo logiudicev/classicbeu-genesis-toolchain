@@ -20,6 +20,7 @@ Build (run from the repo root, in order):
 | `./scripts/build_toolchain.sh build-gcc` | 10–25 min | `verified: 13.2.0 targets m68k-elf, LTO + libgcc OK` |
 | `./scripts/build_toolchain.sh build-sgdk` | ~1 min | `verified: debug ROM builds (131072 bytes, header OK)` |
 | `./scripts/build_toolchain.sh package` | few min | `package finished: out/...-linux-x64.tar.xz` |
+| `./scripts/build_toolchain.sh package-windows` | <1 min | `package-windows finished: out/...-windows-x64.zip` |
 
 Every step is safe to re-run. On failure, the error and log path are printed.
 
@@ -30,8 +31,10 @@ this section gets filled in once that's verified.
 
 ## Windows
 
-Nothing to run. The Windows bundle is made on Linux, and the editor
-downloads it.
+Nothing to run on Windows. The Windows bundle is made on Linux with
+`package-windows` (last row of the Arch Linux table), and the editor
+downloads it. It is not test-built on Linux; the GitHub Action verifies
+it on a Windows machine.
 
 ## Reference
 

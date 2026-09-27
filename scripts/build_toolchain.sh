@@ -5,7 +5,8 @@
 #   scripts/build_toolchain.sh fetch [--record]  download + verify the pinned sources
 #   scripts/build_toolchain.sh build-gcc         build binutils + GCC for the 68000
 #   scripts/build_toolchain.sh build-sgdk        build SGDK's tools + library, then a test ROM
-#   scripts/build_toolchain.sh package           assemble this machine's bundle folder
+#   scripts/build_toolchain.sh package           bundle this machine's toolchain into out/
+#   scripts/build_toolchain.sh package-windows   repack SGDK's Windows build into out/
 #   scripts/build_toolchain.sh clean             delete work/ except downloads
 #
 # Each step can be re-run safely: finished sub-steps are remembered in
@@ -590,12 +591,13 @@ main() {
     local step="${1:-}"
     [[ $# -gt 0 ]] && shift
     case "${step}" in
-        fetch)      step_fetch "$@" ;;
-        build-gcc)  step_build_gcc "$@" ;;
-        build-sgdk) step_build_sgdk "$@" ;;
-        package)    step_package ;;
-        clean)      step_clean ;;
-        *)          die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | package | clean" ;;
+        fetch)           step_fetch "$@" ;;
+        build-gcc)       step_build_gcc "$@" ;;
+        build-sgdk)      step_build_sgdk "$@" ;;
+        package)         step_package ;;
+        package-windows) step_package_windows ;;
+        clean)           step_clean ;;
+        *)               die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | package | package-windows | clean" ;;
     esac
 }
 
