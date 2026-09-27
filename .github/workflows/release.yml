@@ -51,19 +51,19 @@ jobs:
       # If that ever changes, the script stops with "missing tools: ...".
 
       - name: Download and verify sources
-        run: ./scripts/build_toolchain.sh fetch
+        run: bash scripts/build_toolchain.sh fetch
 
       - name: Build the 68000 compiler
-        run: ./scripts/build_toolchain.sh build-gcc
+        run: bash scripts/build_toolchain.sh build-gcc
 
       - name: Build SGDK and test ROMs
-        run: ./scripts/build_toolchain.sh build-sgdk
+        run: bash scripts/build_toolchain.sh build-sgdk
 
       - name: Package the Linux bundle
-        run: ./scripts/build_toolchain.sh package
+        run: bash scripts/build_toolchain.sh package
 
       - name: Package the Windows bundle
-        run: ./scripts/build_toolchain.sh package-windows
+        run: bash scripts/build_toolchain.sh package-windows
 
       # GCC's license requires publishing the source of the binaries we
       # ship: GCC and binutils, plus GMP/MPFR/MPC, which GCC's own script
@@ -134,16 +134,16 @@ jobs:
           bash --version | head -1
 
       - name: Download and verify sources
-        run: ./scripts/build_toolchain.sh fetch
+        run: bash scripts/build_toolchain.sh fetch
 
       - name: Build the 68000 compiler
-        run: ./scripts/build_toolchain.sh build-gcc
+        run: bash scripts/build_toolchain.sh build-gcc
 
       - name: Build SGDK and test ROMs
-        run: ./scripts/build_toolchain.sh build-sgdk
+        run: bash scripts/build_toolchain.sh build-sgdk
 
       - name: Package the macOS bundle
-        run: ./scripts/build_toolchain.sh package
+        run: bash scripts/build_toolchain.sh package
 
       - name: Upload the macOS bundle
         uses: actions/upload-artifact@v7
