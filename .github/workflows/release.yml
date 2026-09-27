@@ -126,3 +126,32 @@ jobs:
           & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release 2>&1 | Tee-Object -Variable out
           $found = [bool]($out -match 'Error 127')
           Write-Host "RESULT: Error 127 with the full PATH: $found"
+      
+
+      # TEMPORARY diagnostic (Edit 3b, part 2): with the restricted PATH,
+      # (1) does the ROM still come out identical, and (2) which single
+      # directory from the runner's PATH makes "Error 127" go away?
+      - name: "Diagnostic: find what the restricted PATH is missing"
+        continue-on-error: true
+        run: |
+          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
+          $base = "$bundle\java\bin;$bundle\sgdk\bin;C:\Windows\System32;C:\Windows"
+          $fullPath = $env:PATH
+
+          $restricted = (Get-FileHash rom-test/out/rom.bin).Hash
+          $full = (Get-FileHash rom-test-fullpath/out/rom.bin).Hash
+          Write-Host "RESULT: ROMs identical: $($restricted -eq $full)"
+
+          $i = 0
+          $foundDir = $null
+          foreach ($dir in $fullPath.Split(';') | Where-Object { $_ }) {
+            $i++
+            $env:PATH = "$base;$dir"
+            New-Item -ItemType Directory "bisect-$i" | Out-Null
+            Push-Location "bisect-$i"
+            $out = & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release 2>&1
+            Pop-Location
+            if (-not ($out -match 'Error 127')) { $foundDir = $dir; break }
+          }
+          if ($foundDir) { Write-Host "RESULT: Error 127 disappears when this PATH entry is added: $foundDir" }
+          else { Write-Host "RESULT: no single PATH entry removed Error 127 (tried $i)" }
