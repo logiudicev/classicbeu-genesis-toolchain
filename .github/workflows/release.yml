@@ -16,5 +16,44 @@ jobs:
       - name: Check out this repo
         uses: actions/checkout@v7
 
+      # Everything the script needs (C/C++ compiler, make, texinfo, Java,
+      # xz, zip, unzip) is preinstalled on GitHub's Ubuntu 24.04 image.
+      # If that ever changes, the script stops with "missing tools: ...".
+
       - name: Download and verify sources
         run: ./scripts/build_toolchain.sh fetch
+
+      - name: Build the 68000 compiler
+        run: ./scripts/build_toolchain.sh build-gcc
+
+      - name: Build SGDK and test ROMs
+        run: ./scripts/build_toolchain.sh build-sgdk
+
+      - name: Package the Linux bundle
+        run: ./scripts/build_toolchain.sh package
+
+      - name: Package the Windows bundle
+        run: ./scripts/build_toolchain.sh package-windows
+
+      - name: Upload the Linux bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-linux-x64
+          path: out/*-linux-x64.tar.xz*
+          if-no-files-found: error
+
+      - name: Upload the Windows bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-windows-x64
+          path: out/*-windows-x64.zip*
+          if-no-files-found: error
+
+      # Only runs if an earlier step failed: keeps the build logs so the
+      # failure can be read after the machine is gone.
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-linux-x64
+          path: work/logs/
