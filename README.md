@@ -70,6 +70,11 @@ downloads, including the compiler (next `build-gcc` takes the full time).
 Then `clean` and rebuild, and bump `TOOLCHAIN_REVISION` only if no version
 in the ID changed.
 
+**Patches:** `patches/` holds our small fixes to upstream sources, listed
+in `GCC_PATCHES` in `versions.env`. Each file explains what it fixes and
+where the fix came from. Currently one: GCC 13.3's fix that lets GCC 13.2
+build with Apple's libc++ on macOS.
+
 **Bundle contents:** `gcc/` (not on Windows), `sgdk/`, `java/`, and
 `toolchain.json`, which tells the editor where each tool is.
 

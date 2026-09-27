@@ -27,6 +27,7 @@ readonly SRC_DIR="${WORK_DIR}/src"
 readonly BUILD_DIR="${WORK_DIR}/build"
 readonly LOG_DIR="${WORK_DIR}/logs"
 readonly STAMP_DIR="${WORK_DIR}/stamps"
+readonly PATCH_DIR="${REPO_ROOT}/patches"
 
 log() { printf '[toolchain] %s\n' "$*"; }
 die() { printf '[toolchain] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -121,6 +122,19 @@ extract() {
     mark_done "extract-${top}"
 }
 
+# apply_patches <source dir> <patch file...>
+# Applies our own small source fixes from patches/ to an unpacked tree.
+# Each file says at its top what it fixes and where the fix came from.
+apply_patches() {
+    local dir="$1" p
+    shift
+    for p in "$@"; do
+        log "patching $(basename "${dir}") with ${p}"
+        patch -p1 -N -s -d "${dir}" < "${PATCH_DIR}/${p}" \
+            || die "patch ${p} did not apply to ${dir}"
+    done
+}
+
 # ── fetch ───────────────────────────────────────────────────────────────────
 # Downloads to "<file>.part" and renames only on success, so an interrupted
 # download never looks finished. Files already present are not re-downloaded.
@@ -174,7 +188,7 @@ step_fetch() {
 
 # ── build-gcc ───────────────────────────────────────────────────────────────
 step_build_gcc() {
-    require_tools make cc c++ tar makeinfo
+    require_tools make cc c++ tar makeinfo patch
 
     # Never build from unverified sources.
     step_fetch
@@ -194,6 +208,15 @@ step_build_gcc() {
     extract "${GCC_FILE}"      "gcc-${GCC_VERSION}"
     local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
     local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
+
+    # Our fixes to the GCC source (GCC_PATCHES in versions.env), applied once
+    # right after unpacking. The count check keeps an empty list safe on bash 3.2.
+    if ! is_done gcc-patches; then
+        if (( ${#GCC_PATCHES[@]} > 0 )); then
+            apply_patches "${gcc_src}" "${GCC_PATCHES[@]}"
+        fi
+        mark_done gcc-patches
+    fi
 
     # GMP/MPFR/MPC: GCC's own script fetches them and checks them against
     # SHA-512 sums that ship INSIDE the gcc tarball we already verified.
