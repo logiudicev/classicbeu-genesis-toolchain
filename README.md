@@ -2,9 +2,24 @@
 
 Builds the Genesis toolchain for the ClassicBEU editor:
 SGDK 2.11 + GCC 13.2 (68000) + portable Java.
-Finished bundles land in `out/`.
+Finished bundles land in `out/`, and are published as GitHub releases.
 
-## Arch Linux
+## Publish a release (normal use)
+
+1. Actions tab → **Build toolchain release** → **Run workflow** → **Run workflow**.
+2. Wait about 30–45 minutes. All five jobs should go green:
+   `Check the release name is free`, `Linux x64`, `macOS arm64`,
+   `Windows x64 (test the bundle)`, `Publish release`.
+3. The release appears under **Releases**, named after `TOOLCHAIN_ID`
+   (currently `sgdk2.11-gcc13.2.0-r1`).
+
+A release name can only be used once. To publish again, bump
+`TOOLCHAIN_REVISION` in `versions.env` first; otherwise the first job stops
+the run.
+
+## Building locally
+
+### Arch Linux
 
 One-time setup:
 
@@ -12,7 +27,7 @@ One-time setup:
 sudo pacman -S --needed base-devel texinfo jre-openjdk-headless zip unzip
 ```
 
-Build (run from the repo root, in order):
+Build (from the repo root, in order):
 
 | Command | Time | Success line |
 |---|---|---|
@@ -22,19 +37,27 @@ Build (run from the repo root, in order):
 | `./scripts/build_toolchain.sh package` | few min | `package finished: out/...-linux-x64.tar.xz` |
 | `./scripts/build_toolchain.sh package-windows` | <1 min | `package-windows finished: out/...-windows-x64.zip` |
 
-Every step is safe to re-run. On failure, the error and log path are printed.
+### macOS (Apple Silicon)
 
-## macOS
+Same commands as the GitHub Action's macOS job. One-time setup (Homebrew):
 
-Not built locally yet. The Mac bundle will be built by the GitHub Action;
-this section gets filled in once that's verified.
+```bash
+brew install texinfo make
+export PATH="$(brew --prefix texinfo)/bin:$(brew --prefix make)/libexec/gnubin:$PATH"
+```
 
-## Windows
+The `export` line is needed in every new terminal before building. Then run
+`fetch`, `build-gcc`, `build-sgdk` and `package` from the table above
+(success lines say `macos-arm64` instead of `linux-x64`).
+
+### Windows
 
 Nothing to run on Windows. The Windows bundle is made on Linux with
-`package-windows` (last row of the Arch Linux table), and the editor
-downloads it. It is not test-built on Linux; the GitHub Action verifies
-it on a Windows machine.
+`package-windows`, test-built by the GitHub Action on a Windows machine, and
+downloaded by the editor.
+
+Every step is safe to re-run. On failure, the error lines and log path are
+printed; logs are in `work/logs/`.
 
 ## Reference
 
@@ -44,10 +67,16 @@ downloads, including the compiler (next `build-gcc` takes the full time).
 
 **Upgrading SGDK / GCC / Java:** edit `versions.env`, delete
 `checksums.sha256`, run `fetch --record`, update the copy below, commit.
-Then `clean` and rebuild.
+Then `clean` and rebuild, and bump `TOOLCHAIN_REVISION` only if no version
+in the ID changed.
 
-**Bundle contents:** `gcc/`, `sgdk/`, `java/`, and `toolchain.json`,
-which tells the editor where each tool is.
+**Bundle contents:** `gcc/` (not on Windows), `sgdk/`, `java/`, and
+`toolchain.json`, which tells the editor where each tool is.
+
+**Known harmless message (Windows only):** a ROM build prints one
+`make[1]: [...ltrans0.ltrans.o] Error 127 (ignored)` line. It comes from a
+Unix tool GCC looks for during the link; the ROM is byte-identical with or
+without it.
 
 **Pinned checksums** (copy of `checksums.sha256`, which is what the script checks):
 

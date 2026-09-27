@@ -1,16 +1,46 @@
 # Builds the ClassicBEU Genesis toolchain bundles on GitHub's machines and
-# publishes them as a GitHub release.
+# publishes them as a GitHub release named after TOOLCHAIN_ID (versions.env).
 #
 # It runs ONLY when started by hand: Actions tab -> "Build toolchain release"
 # -> "Run workflow". Pushing commits never starts it.
+#
+# Jobs:
+#   preflight -> stops early if a release with this TOOLCHAIN_ID exists
+#   linux     -> builds + tests the Linux bundle, repacks the Windows bundle
+#   macos     -> builds + tests the macOS (Apple Silicon) bundle
+#   windows   -> test-builds a ROM with the Windows bundle on real Windows
+#   release   -> publishes all bundles, checksums and source archives
 name: Build toolchain release
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  preflight:
+    name: Check the release name is free
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v7
+
+      - name: Stop if this release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source versions.env
+          echo "Toolchain ID: ${TOOLCHAIN_ID}"
+          if gh release view "${TOOLCHAIN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::Release ${TOOLCHAIN_ID} already exists. Bump TOOLCHAIN_REVISION in versions.env to publish a new one."
+            exit 1
+          fi
+          echo "Release name ${TOOLCHAIN_ID} is free."
+
   linux:
     name: Linux x64
+    needs: preflight
     runs-on: ubuntu-24.04
     steps:
       - name: Check out this repo
@@ -35,6 +65,16 @@ jobs:
       - name: Package the Windows bundle
         run: ./scripts/build_toolchain.sh package-windows
 
+      # GCC's license requires publishing the source of the binaries we
+      # ship: GCC and binutils, plus GMP/MPFR/MPC, which GCC's own script
+      # downloaded into the GCC source folder during build-gcc.
+      - name: Collect the compiler source archives
+        run: |
+          mkdir -p out/sources
+          cp work/downloads/gcc-*.tar.* work/downloads/binutils-*.tar.* out/sources/
+          cp work/src/gcc-*/gmp-*.tar.* work/src/gcc-*/mpfr-*.tar.* work/src/gcc-*/mpc-*.tar.* out/sources/
+          ls -l out/sources
+
       - name: Upload the Linux bundle
         uses: actions/upload-artifact@v7
         with:
@@ -49,6 +89,13 @@ jobs:
           path: out/*-windows-x64.zip*
           if-no-files-found: error
 
+      - name: Upload the compiler source archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: compiler-sources
+          path: out/sources/
+          if-no-files-found: error
+
       # Only runs if an earlier step failed: keeps the build logs so the
       # failure can be read after the machine is gone.
       - name: Upload build logs (on failure)
@@ -56,6 +103,60 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: logs-linux-x64
+          path: work/logs/
+
+  macos:
+    name: macOS arm64
+    needs: preflight
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v7
+
+      # macOS lacks makeinfo (needed to build GCC) and ships GNU make 3.81
+      # from 2006. Homebrew provides both; these lines put them first on
+      # PATH for every later step. C/C++ (Xcode clang), Java, xz, zip and
+      # unzip are preinstalled on GitHub's macOS 15 image.
+      - name: Install build tools (Homebrew)
+        run: |
+          brew install texinfo make
+          echo "$(brew --prefix texinfo)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Show the tool versions this build uses
+        run: |
+          make --version | head -1
+          makeinfo --version | head -1
+          cc --version | head -1
+          java -version 2>&1 | head -1
+          bash --version | head -1
+
+      - name: Download and verify sources
+        run: ./scripts/build_toolchain.sh fetch
+
+      - name: Build the 68000 compiler
+        run: ./scripts/build_toolchain.sh build-gcc
+
+      - name: Build SGDK and test ROMs
+        run: ./scripts/build_toolchain.sh build-sgdk
+
+      - name: Package the macOS bundle
+        run: ./scripts/build_toolchain.sh package
+
+      - name: Upload the macOS bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-macos-arm64
+          path: out/*-macos-arm64.tar.xz*
+          if-no-files-found: error
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-macos-arm64
           path: work/logs/
 
   windows:
@@ -89,6 +190,11 @@ jobs:
       - name: Unpack the bundle
         run: Expand-Archive -Path (Get-ChildItem bundle -Filter *.zip).FullName -DestinationPath unpacked
 
+      # This build prints one "make[1]: [...ltrans0.ltrans.o] Error 127
+      # (ignored)" line during the link. Investigated: it happens because a
+      # Unix tool from Git's usr\bin is not on the restricted PATH, GCC
+      # ignores the failure, and the ROM is byte-identical to a build with
+      # the full PATH. Harmless; left as is.
       - name: Build the test ROM using only the bundle
         run: |
           $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
@@ -111,47 +217,71 @@ jobs:
           $magic = [System.Text.Encoding]::ASCII.GetString($bytes, [int]$env:MD_HEADER_OFFSET, $env:MD_HEADER_MAGIC.Length)
           if ($magic -ne $env:MD_HEADER_MAGIC) { throw "ROM header is '$magic', expected '$env:MD_HEADER_MAGIC'" }
           Write-Host "verified: Windows ROM built from the bundle alone ($($bytes.Length) bytes, header OK)"
-      
 
-      # TEMPORARY diagnostic (Edit 3b): the same build with the runner's full
-      # PATH, to learn whether "Error 127 (ignored)" comes from the restricted
-      # PATH above. Never fails the job. Removed once we have the answer.
-      - name: "Diagnostic: build with the full PATH"
-        continue-on-error: true
+  release:
+    name: Publish release
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v7
+
+      - name: Download all bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bundle-*
+          path: release
+          merge-multiple: true
+
+      - name: Download the compiler source archives
+        uses: actions/download-artifact@v8
+        with:
+          name: compiler-sources
+          path: release
+
+      # Java is GPL-licensed too; attach Adoptium's source archive for the
+      # exact JRE version we ship, checked against Adoptium's own checksum.
+      - name: Download the Java source archive
+        working-directory: release
         run: |
-          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
-          $env:PATH = "$bundle\java\bin;$bundle\sgdk\bin;$env:PATH"
-          New-Item -ItemType Directory rom-test-fullpath | Out-Null
-          Set-Location rom-test-fullpath
-          & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release 2>&1 | Tee-Object -Variable out
-          $found = [bool]($out -match 'Error 127')
-          Write-Host "RESULT: Error 127 with the full PATH: $found"
-      
+          source ../versions.env
+          curl --fail --location --silent --show-error --retry 3 -O "${JRE_URL_BASE}/${JRE_SOURCES_FILE}"
+          curl --fail --location --silent --show-error --retry 3 -O "${JRE_URL_BASE}/${JRE_SOURCES_FILE}.sha256.txt"
+          sha256sum -c "${JRE_SOURCES_FILE}.sha256.txt"
+          rm "${JRE_SOURCES_FILE}.sha256.txt"
 
-      # TEMPORARY diagnostic (Edit 3b, part 2): with the restricted PATH,
-      # (1) does the ROM still come out identical, and (2) which single
-      # directory from the runner's PATH makes "Error 127" go away?
-      - name: "Diagnostic: find what the restricted PATH is missing"
-        continue-on-error: true
+      - name: Verify every bundle checksum
+        working-directory: release
         run: |
-          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
-          $base = "$bundle\java\bin;$bundle\sgdk\bin;C:\Windows\System32;C:\Windows"
-          $fullPath = $env:PATH
+          sha256sum -c *.sha256
+          ls -l
 
-          $restricted = (Get-FileHash rom-test/out/rom.bin).Hash
-          $full = (Get-FileHash rom-test-fullpath/out/rom.bin).Hash
-          Write-Host "RESULT: ROMs identical: $($restricted -eq $full)"
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source versions.env
+          cat > notes.md <<NOTES
+          Genesis toolchain for the ClassicBEU editor.
 
-          $i = 0
-          $foundDir = $null
-          foreach ($dir in $fullPath.Split(';') | Where-Object { $_ }) {
-            $i++
-            $env:PATH = "$base;$dir"
-            New-Item -ItemType Directory "bisect-$i" | Out-Null
-            Push-Location "bisect-$i"
-            $out = & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release 2>&1
-            Pop-Location
-            if (-not ($out -match 'Error 127')) { $foundDir = $dir; break }
-          }
-          if ($foundDir) { Write-Host "RESULT: Error 127 disappears when this PATH entry is added: $foundDir" }
-          else { Write-Host "RESULT: no single PATH entry removed Error 127 (tried $i)" }
+          | Component | Version |
+          |---|---|
+          | SGDK | ${SGDK_TAG#v} |
+          | GCC (m68k-elf, ${TARGET_CPU}) | ${GCC_VERSION} |
+          | binutils | ${BINUTILS_VERSION} |
+          | Java (Eclipse Temurin JRE) | ${JRE_VERSION} |
+
+          Bundles, each with a .sha256:
+          - linux-x64 and macos-arm64: built from source on GitHub runners; each built a test ROM using only the bundle.
+          - windows-x64: SGDK's own Windows build plus Java; built a test ROM on a Windows runner.
+
+          Source code: the GCC, binutils, GMP, MPFR, MPC and Java source archives are attached.
+          SGDK source: https://github.com/Stephane-D/SGDK/tree/${SGDK_TAG}
+          NOTES
+          gh release create "${TOOLCHAIN_ID}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "Genesis toolchain ${TOOLCHAIN_ID}" \
+            --notes-file notes.md

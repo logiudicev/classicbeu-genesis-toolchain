@@ -12,6 +12,8 @@
 # Each step can be re-run safely: finished sub-steps are remembered in
 # work/stamps and skipped. All scratch output goes to work/ (git-ignored).
 # Versions, URLs and target settings live in versions.env -- never here.
+#
+# Written for bash 3.2 as well as newer bash: macOS still ships bash 3.2.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,10 +55,15 @@ detect_host() {
             # Link GCC's own C++ runtime statically, so the finished bundle
             # runs on any Linux install regardless of its libstdc++ version.
             HOST_LDFLAGS="-static-libstdc++ -static-libgcc"
+            # Linux builds use the zlib copy bundled with GCC/binutils.
+            HOST_CONFIGURE_FLAGS=""
             ;;
         macos)
             JOBS="$(sysctl -n hw.ncpu)"
             HOST_LDFLAGS=""
+            # The zlib copy bundled with GCC 13 / binutils 2.41 does not
+            # compile against recent macOS SDKs; macOS always ships zlib.
+            HOST_CONFIGURE_FLAGS="--with-system-zlib"
             ;;
     esac
     # Linux ships sha256sum; macOS ships shasum. Same checksum file format.
@@ -117,12 +124,17 @@ extract() {
 # ── fetch ───────────────────────────────────────────────────────────────────
 # Downloads to "<file>.part" and renames only on success, so an interrupted
 # download never looks finished. Files already present are not re-downloaded.
+# The progress bar is shown only in a live terminal; in CI logs it would be
+# pages of noise, so there curl stays quiet and prints errors only.
 download() {
     local file="$1" url="$2"
     local dest="${DOWNLOAD_DIR}/${file}"
     if [[ -f "${dest}" ]]; then log "already have ${file}"; return 0; fi
     log "downloading ${file}"
-    curl --fail --location --retry 3 --progress-bar --output "${dest}.part" "${url}"
+    local progress="--silent --show-error"
+    [[ -t 2 ]] && progress="--progress-bar"
+    # ${progress} is deliberately unquoted: it holds one or two flags.
+    curl --fail --location --retry 3 ${progress} --output "${dest}.part" "${url}"
     mv "${dest}.part" "${dest}"
 }
 
@@ -198,12 +210,14 @@ step_build_gcc() {
         local bu_build="${BUILD_DIR}/binutils"
         rm -rf "${bu_build}"
         mkdir -p "${bu_build}"
+        # HOST_CONFIGURE_FLAGS is deliberately unquoted: it may be empty or several flags.
         run_logged binutils-configure "${bu_build}" "${bu_src}/configure" \
             --target="${TARGET}" \
             --prefix="${STAGE_DIR}" \
             --enable-plugins \
             --disable-nls \
-            --disable-werror
+            --disable-werror \
+            ${HOST_CONFIGURE_FLAGS}
         run_logged binutils-make    "${bu_build}" make -j"${JOBS}"
         run_logged binutils-install "${bu_build}" make install
         mark_done binutils
@@ -216,6 +230,7 @@ step_build_gcc() {
         mkdir -p "${gcc_build}"
         # Bare-metal C compiler for the 68000 only: no OS, no C library,
         # no threads. LTO stays on because SGDK's release builds use it.
+        # HOST_CONFIGURE_FLAGS is deliberately unquoted (see binutils above).
         run_logged gcc-configure "${gcc_build}" "${gcc_src}/configure" \
             --target="${TARGET}" \
             --prefix="${STAGE_DIR}" \
@@ -231,7 +246,8 @@ step_build_gcc() {
             --disable-libssp \
             --disable-libquadmath \
             --disable-libgomp \
-            --disable-libatomic
+            --disable-libatomic \
+            ${HOST_CONFIGURE_FLAGS}
         run_logged gcc-make    "${gcc_build}" make -j"${JOBS}" all-gcc all-target-libgcc
         run_logged gcc-install "${gcc_build}" make install-gcc install-target-libgcc
         mark_done gcc
@@ -253,10 +269,8 @@ verify_gcc() {
     rm -rf "${dir}"
     mkdir -p "${dir}"
     cat > "${dir}/probe.c" <<'PROBE'
-
 /* volatile: the compiler must read these at runtime, so it cannot
    pre-compute the multiply -- the 68000 then needs libgcc's __mulsi3. */
-
 volatile int probe_input = 7;
 volatile int probe_result;
 void entry(void) { probe_result = probe_input * probe_input; }
@@ -274,8 +288,9 @@ PROBE
 # What goes into the bundle from the SGDK source tree. Deliberately left out:
 # Windows .exe/.dll files, the prebuilt Windows lib/ (we rebuild it), samples,
 # docs, and the tools' source code (we compile the tools below instead).
-readonly SGDK_STAGE_ITEMS=(inc src res md.ld makefile.gen makelib.gen common.mk
-                           license.txt COPYING.RUNTIME readme.md)
+SGDK_STAGE_ITEMS=(inc src res md.ld makefile.gen makelib.gen common.mk
+                  license.txt COPYING.RUNTIME readme.md)
+readonly SGDK_STAGE_ITEMS
 
 # SGDK pads every ROM to a multiple of this (makefile.gen: sizebnd -sizealign).
 readonly SGDK_ROM_ALIGN=131072
@@ -322,6 +337,7 @@ build_sgdk_host_tools() {
     rm -rf "${out}"
     mkdir -p "${out}"
     log "SGDK host tools"
+    # HOST_LDFLAGS is deliberately unquoted: it may be empty or several flags.
     # Z80 sound-driver assembler + its binary-to-source converter.
     run_logged tool-sjasm "${out}" c++ -std=gnu++11 -O2 -DMAX_PATH=MAXPATHLEN \
         ${HOST_LDFLAGS} -o sjasm "${tools}"/sjasm/src/*.cpp
@@ -471,7 +487,8 @@ MANIFEST
 #     other machine. These queries print where GCC really looks.
 #  2. SGDK's hello-world ROM builds using only the bundle's compiler, SGDK
 #     and Java. PATH is replaced for that one command: bundle folders first,
-#     then /usr/bin and /bin only so make and basic commands still exist.
+#     then the folder of the `make` this build already uses (Homebrew's GNU
+#     make on macOS), then /usr/bin and /bin for basic commands.
 verify_bundle() {
     local root="$1" host="$2"
     local gcc_bin="${root}/gcc/bin/${TARGET}-gcc" query found
@@ -483,14 +500,15 @@ verify_bundle() {
     done
     log "verified: bundle GCC finds its own files inside the bundle"
 
-    local java_exe java_bin_dir
+    local java_exe java_bin_dir make_dir
     java_exe="$(java_exe_for "${host}")"
     java_bin_dir="$(dirname "${root}/${java_exe}")"
+    make_dir="$(dirname "$(command -v make)")"
     local dir="${WORK_DIR}/verify-bundle"
     rm -rf "${dir}"
     mkdir -p "${dir}"
     run_logged verify-bundle "${dir}" \
-        env PATH="${root}/gcc/bin:${root}/sgdk/bin:${java_bin_dir}:/usr/bin:/bin" \
+        env PATH="${root}/gcc/bin:${root}/sgdk/bin:${java_bin_dir}:${make_dir}:/usr/bin:/bin" \
         make -f "${root}/sgdk/makefile.gen" GDK="${root}/sgdk" PREFIX="${TARGET}-" release
     check_rom "${dir}/out/rom.bin" "ROM built from the bundle alone"
 }
@@ -528,6 +546,7 @@ step_package() {
     write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}"
     verify_bundle "${root}" "${host}"
     log "bundle folder ready: work/bundle/${name}"
+
     mkdir -p "${OUT_DIR}"
     local archive="${OUT_DIR}/${name}.tar.xz"
     rm -f "${archive}" "${archive}.sha256"
