@@ -57,3 +57,57 @@ jobs:
         with:
           name: logs-linux-x64
           path: work/logs/
+
+  windows:
+    name: Windows x64 (test the bundle)
+    needs: linux
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # These three must match SGDK_ROM_ALIGN, MD_HEADER_OFFSET and
+      # MD_HEADER_MAGIC in scripts/build_toolchain.sh (same ROM checks).
+      SGDK_ROM_ALIGN: 131072
+      MD_HEADER_OFFSET: 256
+      MD_HEADER_MAGIC: SEGA MEGA DRIVE
+    steps:
+      - name: Download the Windows bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-windows-x64
+          path: bundle
+
+      - name: Verify the bundle's checksum
+        run: |
+          $zip = Get-ChildItem bundle -Filter *.zip | Select-Object -First 1
+          $expected = (Get-Content "$($zip.FullName).sha256").Split(' ')[0]
+          $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "checksum mismatch: expected $expected, got $actual" }
+          Write-Host "verified: $($zip.Name) checksum OK"
+
+      - name: Unpack the bundle
+        run: Expand-Archive -Path (Get-ChildItem bundle -Filter *.zip).FullName -DestinationPath unpacked
+
+      - name: Build the test ROM using only the bundle
+        run: |
+          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
+          # Only the bundle's Java and SGDK tools, plus Windows itself.
+          $env:PATH = "$bundle\java\bin;$bundle\sgdk\bin;C:\Windows\System32;C:\Windows"
+          Write-Host "java used: $((Get-Command java).Source)"
+          & "$bundle\sgdk\bin\gcc.exe" --version | Select-Object -First 1
+          New-Item -ItemType Directory rom-test | Out-Null
+          Set-Location rom-test
+          & "$bundle\sgdk\bin\make.exe" -f "$bundle/sgdk/makefile.gen" release
+          if ($LASTEXITCODE -ne 0) { throw "make failed with exit code $LASTEXITCODE" }
+
+      - name: Check the ROM
+        run: |
+          $rom = "rom-test/out/rom.bin"
+          if (-not (Test-Path $rom)) { throw "no ROM produced at $rom" }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $rom))
+          $align = [int]$env:SGDK_ROM_ALIGN
+          if ($bytes.Length -eq 0 -or $bytes.Length % $align -ne 0) { throw "ROM size $($bytes.Length) is not a multiple of $align" }
+          $magic = [System.Text.Encoding]::ASCII.GetString($bytes, [int]$env:MD_HEADER_OFFSET, $env:MD_HEADER_MAGIC.Length)
+          if ($magic -ne $env:MD_HEADER_MAGIC) { throw "ROM header is '$magic', expected '$env:MD_HEADER_MAGIC'" }
+          Write-Host "verified: Windows ROM built from the bundle alone ($($bytes.Length) bytes, header OK)"
