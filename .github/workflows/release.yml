@@ -8,9 +8,11 @@
 #
 # Jobs:
 #   preflight -> stops early if a release with this TOOLCHAIN_ID exists
-#   linux     -> builds + tests the Linux bundle, cross-builds the Windows
-#                SH-2 compiler, repacks the Windows bundle
-#   macos     -> builds + tests the macOS (Apple Silicon) bundle
+#   linux     -> builds + tests the Linux bundle (Genesis, 32X, Dreamcast),
+#                cross-builds the Windows SH-2 compiler, repacks the Windows
+#                bundle
+#   macos     -> builds + tests the macOS (Apple Silicon) bundle (Genesis,
+#                32X, Dreamcast)
 #   windows   -> test-builds a ROM with the Windows bundle on real Windows
 #   release   -> publishes all bundles, checksums and source archives
 name: Build toolchain release
@@ -71,6 +73,9 @@ jobs:
       - name: Build SGDK and test ROMs
         run: bash scripts/build_toolchain.sh build-sgdk
 
+      - name: Build the Dreamcast compiler and KallistiOS
+        run: bash scripts/build_toolchain.sh build-dc
+
       - name: Package the Linux bundle
         run: bash scripts/build_toolchain.sh package
 
@@ -79,11 +84,14 @@ jobs:
 
       # GCC's license requires publishing the source of the binaries we
       # ship: GCC and binutils, plus GMP/MPFR/MPC, which GCC's own script
-      # downloaded into the GCC source folder during build-gcc.
+      # downloaded into the GCC source folder during build-gcc. The
+      # Dreamcast's newlib and KallistiOS (with the patches applied to GCC
+      # and newlib) are attached too.
       - name: Collect the compiler source archives
         run: |
           mkdir -p out/sources
           cp work/downloads/gcc-*.tar.* work/downloads/binutils-*.tar.* out/sources/
+          cp work/downloads/newlib-*.tar.* work/downloads/KallistiOS-*.tar.* out/sources/
           cp work/src/gcc-*/gmp-*.tar.* work/src/gcc-*/mpfr-*.tar.* work/src/gcc-*/mpc-*.tar.* out/sources/
           ls -l out/sources
 
@@ -156,6 +164,9 @@ jobs:
 
       - name: Build SGDK and test ROMs
         run: bash scripts/build_toolchain.sh build-sgdk
+
+      - name: Build the Dreamcast compiler and KallistiOS
+        run: bash scripts/build_toolchain.sh build-dc
 
       - name: Package the macOS bundle
         run: bash scripts/build_toolchain.sh package
@@ -306,14 +317,17 @@ jobs:
           | SGDK | ${SGDK_TAG#v} |
           | GCC (m68k-elf, ${TARGET_CPU}) | ${GCC_VERSION} |
           | GCC (sh-elf, ${SH2_TARGET_CPU}: the 32X's SH-2s) | ${GCC_VERSION} |
+          | GCC (sh-elf, SH-4: the Dreamcast; C and C++, linux-x64 and macos-arm64) | ${GCC_VERSION} |
+          | KallistiOS (the Dreamcast; BSD license) | ${KOS_COMMIT} |
+          | newlib (the Dreamcast's C library) | ${NEWLIB_VERSION} |
           | binutils | ${BINUTILS_VERSION} |
           | Java (Eclipse Temurin JRE) | ${JRE_VERSION} |
 
           Bundles, each with a .sha256:
-          - linux-x64 and macos-arm64: built from source on GitHub runners; each built a test ROM using only the bundle.
+          - linux-x64 and macos-arm64: built from source on GitHub runners; each built a test ROM using only the bundle, and Dreamcast C and C++ programs with its KallistiOS (dreamcast/ folder; makeip included, with KallistiOS's copyright-free bootstrap; no Sega code).
           - windows-x64: SGDK's own Windows build plus Java, and the SH-2 compiler built for Windows; built a test ROM and compiled SH-2 code on a Windows runner.
 
-          Source code: the GCC, binutils, GMP, MPFR, MPC and Java source archives are attached.
+          Source code: the GCC, binutils, GMP, MPFR, MPC, newlib, KallistiOS and Java source archives are attached (KallistiOS's patches to GCC and newlib are in its utils/kos-chain/patches).
           SGDK source: https://github.com/Stephane-D/SGDK/tree/${SGDK_TAG}
           NOTES
           gh release create "${TOOLCHAIN_ID}" release/* \

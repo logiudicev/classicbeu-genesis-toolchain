@@ -1,0 +1,65 @@
+KallistiOS's makeip (utils/makeip), built without libpng.
+
+What: makeip reads its boot logo (-l) as an MR image only; a PNG gets a
+clear error. Its Makefile no longer links libpng and zlib, and compiles
+with MAKEIP_NO_PNG, which leaves out its PNG reader (png_read).
+
+Why: makeip links libpng dynamically. macOS has no system libpng, so a
+bundled makeip would not start there (and it would tie the Linux bundle to
+the build machine's libpng). Retro Game Studio converts a boot logo to MR
+itself, so the bundle's makeip never needs PNG.
+
+Source: ours (classicbeu-genesis-toolchain), against KallistiOS commit
+d458073c00025f065cc68bebb8ef15ea83264e2b.
+
+--- a/utils/makeip/src/Makefile
++++ b/utils/makeip/src/Makefile
+@@ -7,8 +7,8 @@
+ CC = gcc
+ STRIP = strip
+ 
+-CFLAGS = -O2 -Wall -DMAKEIP_VERSION=\"$(VERSION)\" -I/usr/local/include
+-LDFLAGS = -L/usr/local/lib -lpng -lz
++CFLAGS = -O2 -Wall -DMAKEIP_VERSION=\"$(VERSION)\" -DMAKEIP_NO_PNG
++LDFLAGS =
+ 
+ INSTALLDIR = ..
+ 
+--- a/utils/makeip/src/mr.h
++++ b/utils/makeip/src/mr.h
+@@ -40,7 +40,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#ifndef MAKEIP_NO_PNG
+ #include <png.h>
++#endif
+ 
+ char * mr_get_friendly_supported_format(void);
+ void mr_export(char *fn_imgin, char *fn_imgout);
+--- a/utils/makeip/src/mr.c
++++ b/utils/makeip/src/mr.c
+@@ -237,6 +237,7 @@
+   return result;
+ }
+ 
++#ifndef MAKEIP_NO_PNG
+ int
+ png_read(char *file_name, mr_output_t *output)
+ {
+@@ -337,6 +338,15 @@
+ 
+    return result;
+ }
++#else
++int
++png_read(char *file_name, mr_output_t *output)
++{
++  (void) output;
++  log_error("\"%s\": this makeip reads MR images only (built without libpng); convert the PNG to MR first\n", file_name);
++  return 0;
++}
++#endif
+ 
+ void
+ mr_init(mr_output_t *output)

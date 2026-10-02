@@ -1,0 +1,35 @@
+# Pins sources newly added to ARTIFACTS (versions.env): downloads every
+# source, checks the ones already pinned, and prints the SHA-256 of the
+# ones that have no checksum yet (fetch --record-missing), for a person to
+# review and commit to checksums.sha256. Never changes an existing pin.
+#
+# Runs only when started by hand: Actions tab -> "Pin new sources" -> "Run
+# workflow".
+name: Pin new sources
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pin:
+    name: Pin sources without a checksum
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v7
+
+      - name: Download, check the pinned ones, pin the new ones
+        run: bash scripts/build_toolchain.sh fetch --record-missing
+
+      - name: Show what changed
+        run: git diff --no-color -- checksums.sha256
+
+      - name: Upload checksums.sha256
+        uses: actions/upload-artifact@v7
+        with:
+          name: checksums
+          path: checksums.sha256
+          if-no-files-found: error
