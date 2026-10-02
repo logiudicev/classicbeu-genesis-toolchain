@@ -424,8 +424,10 @@ step_build_sh2_windows() {
     [[ "${HOST_OS}" == "linux" ]] || die "build-sh2-windows runs on Linux only"
     is_done gcc-sh2 || die "run build-sh2 first (its libgcc and assembler are needed)"
     prepare_compiler_sources
-    # Windows programs that need no MinGW DLLs beside them.
-    export LDFLAGS="-static -static-libgcc -static-libstdc++"
+    # Windows programs that need no MinGW DLLs beside them: the C and C++
+    # runtimes linked in. Not plain -static: that stops libtool making any
+    # DLL, and the LTO linker plugin (liblto_plugin.dll) is one.
+    export LDFLAGS="-static-libgcc -static-libstdc++"
     local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
     local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
     local stage="${WORK_DIR}/stage/windows-x64-sh2"
@@ -453,10 +455,7 @@ step_build_sh2_windows() {
         local gcc_build="${BUILD_DIR}/gcc-sh2-windows"
         rm -rf "${gcc_build}"
         mkdir -p "${gcc_build}"
-        # GCC asks the linker whether it takes plugins (LTO), but a Windows
-        # linker can't run here; the answer is yes (binutils above has
-        # --enable-plugins), so it is given: 2 = the plugin, with -fuse-linker-plugin.
-        run_logged gcc-sh2-windows-configure "${gcc_build}" env gcc_cv_lto_plugin=2 "${gcc_src}/configure" \
+        run_logged gcc-sh2-windows-configure "${gcc_build}" "${gcc_src}/configure" \
             --host="${MINGW_HOST}" \
             "${SH2_GCC_CONFIGURE_FLAGS[@]}" \
             --prefix="${stage}"
@@ -471,6 +470,8 @@ step_build_sh2_windows() {
     fi
     [[ -f "${stage}/bin/${SH2_TARGET}-gcc.exe" && -f "${stage}/lib/gcc/${SH2_TARGET}/${GCC_VERSION}/libgcc.a" ]] \
         || die "the Windows SH-2 compiler is incomplete in ${stage}"
+    [[ -f "${stage}/libexec/gcc/${SH2_TARGET}/${GCC_VERSION}/liblto_plugin.dll" ]] \
+        || die "the Windows SH-2 compiler has no LTO plugin (liblto_plugin.dll)"
     log "build-sh2-windows finished: ${stage} (NOT test-run; the Windows CI job does that)"
 }
 
