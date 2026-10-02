@@ -2,11 +2,14 @@
 # publishes them as a GitHub release named after TOOLCHAIN_ID (versions.env).
 #
 # It runs ONLY when started by hand: Actions tab -> "Build toolchain release"
-# -> "Run workflow". Pushing commits never starts it.
+# -> "Run workflow". Pushing commits never starts it. Run from main, it
+# publishes; run from any other branch, it builds and tests everything but
+# publishes nothing (a trial run).
 #
 # Jobs:
 #   preflight -> stops early if a release with this TOOLCHAIN_ID exists
-#   linux     -> builds + tests the Linux bundle, repacks the Windows bundle
+#   linux     -> builds + tests the Linux bundle, cross-builds the Windows
+#                SH-2 compiler, repacks the Windows bundle
 #   macos     -> builds + tests the macOS (Apple Silicon) bundle
 #   windows   -> test-builds a ROM with the Windows bundle on real Windows
 #   release   -> publishes all bundles, checksums and source archives
@@ -49,12 +52,21 @@ jobs:
       # Everything the script needs (C/C++ compiler, make, texinfo, Java,
       # xz, zip, unzip) is preinstalled on GitHub's Ubuntu 24.04 image.
       # If that ever changes, the script stops with "missing tools: ...".
+      # MinGW-w64 is added: it builds the Windows SH-2 compiler.
+      - name: Install MinGW-w64 (for the Windows SH-2 compiler)
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
       - name: Download and verify sources
         run: bash scripts/build_toolchain.sh fetch
 
       - name: Build the 68000 compiler
         run: bash scripts/build_toolchain.sh build-gcc
+
+      - name: Build the SH-2 compiler (32X)
+        run: bash scripts/build_toolchain.sh build-sh2
+
+      - name: Build the SH-2 compiler for Windows
+        run: bash scripts/build_toolchain.sh build-sh2-windows
 
       - name: Build SGDK and test ROMs
         run: bash scripts/build_toolchain.sh build-sgdk
@@ -139,6 +151,9 @@ jobs:
       - name: Build the 68000 compiler
         run: bash scripts/build_toolchain.sh build-gcc
 
+      - name: Build the SH-2 compiler (32X)
+        run: bash scripts/build_toolchain.sh build-sh2
+
       - name: Build SGDK and test ROMs
         run: bash scripts/build_toolchain.sh build-sgdk
 
@@ -218,9 +233,29 @@ jobs:
           if ($magic -ne $env:MD_HEADER_MAGIC) { throw "ROM header is '$magic', expected '$env:MD_HEADER_MAGIC'" }
           Write-Host "verified: Windows ROM built from the bundle alone ($($bytes.Length) bytes, header OK)"
 
+      # The 32X's SH-2 compiler (built on Linux for Windows): compiles, links
+      # through LTO, pulls a divide from libgcc, and makes an SH ELF.
+      - name: Test the SH-2 compiler
+        run: |
+          $bundle = (Get-ChildItem unpacked -Directory | Select-Object -First 1).FullName
+          $env:PATH = "$bundle\sh2\bin;C:\Windows\System32;C:\Windows"
+          & sh-elf-gcc.exe --version | Select-Object -First 1
+          New-Item -ItemType Directory sh2-test | Out-Null
+          Set-Location sh2-test
+          Set-Content probe.c "volatile int a = 1000, b = 7; volatile int r; void entry(void) { r = a / b; }"
+          & sh-elf-gcc.exe -m2 -mb -O2 -flto -fuse-linker-plugin -nostdlib "-Wl,-e,_entry" probe.c -o probe.elf -lgcc
+          if ($LASTEXITCODE -ne 0) { throw "sh-elf-gcc failed with exit code $LASTEXITCODE" }
+          $format = & sh-elf-objdump.exe -f probe.elf | Out-String
+          if ($format -notmatch "elf32-sh") { throw "probe.elf is not an SH ELF: $format" }
+          $symbols = & sh-elf-nm.exe probe.elf | Out-String
+          if ($symbols -notmatch "divsi3") { throw "libgcc was not linked (no divide routine)" }
+          Write-Host "verified: Windows SH-2 compiler builds and links (LTO + libgcc OK)"
+
   release:
     name: Publish release
     needs: [linux, macos, windows]
+    # Only from main: a run from another branch is a trial build.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -270,12 +305,13 @@ jobs:
           |---|---|
           | SGDK | ${SGDK_TAG#v} |
           | GCC (m68k-elf, ${TARGET_CPU}) | ${GCC_VERSION} |
+          | GCC (sh-elf, ${SH2_TARGET_CPU}: the 32X's SH-2s) | ${GCC_VERSION} |
           | binutils | ${BINUTILS_VERSION} |
           | Java (Eclipse Temurin JRE) | ${JRE_VERSION} |
 
           Bundles, each with a .sha256:
           - linux-x64 and macos-arm64: built from source on GitHub runners; each built a test ROM using only the bundle.
-          - windows-x64: SGDK's own Windows build plus Java; built a test ROM on a Windows runner.
+          - windows-x64: SGDK's own Windows build plus Java, and the SH-2 compiler built for Windows; built a test ROM and compiled SH-2 code on a Windows runner.
 
           Source code: the GCC, binutils, GMP, MPFR, MPC and Java source archives are attached.
           SGDK source: https://github.com/Stephane-D/SGDK/tree/${SGDK_TAG}

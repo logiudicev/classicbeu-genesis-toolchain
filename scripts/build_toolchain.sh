@@ -4,6 +4,8 @@
 # Usage:
 #   scripts/build_toolchain.sh fetch [--record]  download + verify the pinned sources
 #   scripts/build_toolchain.sh build-gcc         build binutils + GCC for the 68000
+#   scripts/build_toolchain.sh build-sh2         build binutils + GCC for the 32X's SH-2s
+#   scripts/build_toolchain.sh build-sh2-windows the SH-2 compiler for Windows (needs build-sh2)
 #   scripts/build_toolchain.sh build-sgdk        build SGDK's tools + library, then a test ROM
 #   scripts/build_toolchain.sh package           bundle this machine's toolchain into out/
 #   scripts/build_toolchain.sh package-windows   repack SGDK's Windows build into out/
@@ -187,9 +189,11 @@ step_fetch() {
 }
 
 # ── build-gcc ───────────────────────────────────────────────────────────────
-step_build_gcc() {
-    require_tools make cc c++ tar makeinfo patch
-
+# prepare_compiler_sources
+# What both compilers (68000 and SH-2) build from: the verified GCC and
+# binutils sources, unpacked and patched once, with GCC's prerequisites, and
+# the host compiler flags. Safe to call again: each part is stamped.
+prepare_compiler_sources() {
     # Never build from unverified sources.
     step_fetch
 
@@ -201,12 +205,12 @@ step_build_gcc() {
     export CFLAGS="-O2 -std=gnu17"
     export CXXFLAGS="-O2 -std=gnu++11"
     export LDFLAGS="${HOST_LDFLAGS}"
-    # GCC's build must find the m68k binutils we install first.
+    # GCC's build must find the binutils we install first (both targets'
+    # land in the same stage).
     export PATH="${STAGE_DIR}/bin:${PATH}"
 
     extract "${BINUTILS_FILE}" "binutils-${BINUTILS_VERSION}"
     extract "${GCC_FILE}"      "gcc-${GCC_VERSION}"
-    local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
     local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
 
     # Our fixes to the GCC source (GCC_PATCHES in versions.env), applied once
@@ -227,6 +231,13 @@ step_build_gcc() {
         run_logged gcc-prereqs "${gcc_src}" ./contrib/download_prerequisites --no-isl
         mark_done gcc-prereqs
     fi
+}
+
+step_build_gcc() {
+    require_tools make cc c++ tar makeinfo patch
+    prepare_compiler_sources
+    local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
+    local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
 
     if ! is_done binutils; then
         log "binutils ${BINUTILS_VERSION} -> ${TARGET}"
@@ -305,6 +316,158 @@ PROBE
     "${nm_bin}" "${dir}/probe.elf" | grep -q "__mulsi3" \
         || die "libgcc was not linked (no __mulsi3)"
     log "verified: $("${gcc_bin}" -dumpversion) targets ${TARGET}, LTO + libgcc OK"
+}
+
+# ── build-sh2 ───────────────────────────────────────────────────────────────
+# The 32X's two SH-2s run their own code: binutils and GCC for SH2_TARGET
+# (versions.env), from the same sources and with the same choices as the
+# 68000 compiler (C only, no OS, no C library, LTO on), installed into the
+# same stage so the bundle's gcc/bin holds both (m68k-elf-*, sh-elf-*).
+step_build_sh2() {
+    require_tools make cc c++ tar makeinfo patch
+    prepare_compiler_sources
+    local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
+    local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
+
+    if ! is_done binutils-sh2; then
+        log "binutils ${BINUTILS_VERSION} -> ${SH2_TARGET}"
+        local bu_build="${BUILD_DIR}/binutils-sh2"
+        rm -rf "${bu_build}"
+        mkdir -p "${bu_build}"
+        # HOST_CONFIGURE_FLAGS is deliberately unquoted (see build-gcc).
+        run_logged binutils-sh2-configure "${bu_build}" "${bu_src}/configure" \
+            --target="${SH2_TARGET}" \
+            --prefix="${STAGE_DIR}" \
+            --enable-plugins \
+            --disable-nls \
+            --disable-werror \
+            ${HOST_CONFIGURE_FLAGS}
+        run_logged binutils-sh2-make    "${bu_build}" make -j"${JOBS}"
+        run_logged binutils-sh2-install "${bu_build}" make install
+        mark_done binutils-sh2
+    fi
+
+    if ! is_done gcc-sh2; then
+        log "gcc ${GCC_VERSION} -> ${SH2_TARGET} (${SH2_TARGET_CPU}); the slow one again"
+        local gcc_build="${BUILD_DIR}/gcc-sh2"
+        rm -rf "${gcc_build}"
+        mkdir -p "${gcc_build}"
+        run_logged gcc-sh2-configure "${gcc_build}" "${gcc_src}/configure" \
+            "${SH2_GCC_CONFIGURE_FLAGS[@]}" \
+            --prefix="${STAGE_DIR}" \
+            ${HOST_CONFIGURE_FLAGS}
+        run_logged gcc-sh2-make    "${gcc_build}" make -j"${JOBS}" all-gcc all-target-libgcc
+        run_logged gcc-sh2-install "${gcc_build}" make install-gcc install-target-libgcc
+        mark_done gcc-sh2
+    fi
+
+    verify_sh2_gcc "${STAGE_DIR}/bin/${SH2_TARGET}-"
+    log "build-sh2 finished: ${STAGE_DIR}"
+}
+
+# What GCC is configured with for the SH-2 (here and for Windows): the 32X's
+# SH7604s, big-endian, bare metal, C only. One CPU, so one libgcc (m2).
+SH2_GCC_CONFIGURE_FLAGS=(
+    --target="${SH2_TARGET}"
+    --with-cpu="${SH2_TARGET_CPU}"
+    --with-multilib-list="${SH2_TARGET_CPU}"
+    --enable-languages=c
+    --enable-lto
+    --without-headers
+    --disable-shared
+    --disable-threads
+    --disable-nls
+    --disable-werror
+    --disable-libssp
+    --disable-libquadmath
+    --disable-libgomp
+    --disable-libatomic
+)
+
+# verify_sh2_gcc <tool path prefix, e.g. .../bin/sh-elf->
+# Proves the SH-2 compiler is usable, as verify_gcc does for the 68000:
+#   - compiles for the SH-2 (big-endian SH ELF),
+#   - links through the LTO plugin,
+#   - pulls a divide from libgcc (the SH-2 has no single divide instruction).
+verify_sh2_gcc() {
+    local prefix="$1"
+    local dir="${WORK_DIR}/verify-sh2"
+    rm -rf "${dir}"
+    mkdir -p "${dir}"
+    cat > "${dir}/probe.c" <<'PROBE'
+/* volatile: computed at run time, so the divide needs libgcc. */
+volatile int probe_a = 1000, probe_b = 7;
+volatile int probe_result;
+void entry(void) { probe_result = probe_a / probe_b; }
+PROBE
+    run_logged verify-sh2-compile "${dir}" "${prefix}gcc" -"${SH2_TARGET_CPU}" -mb -O2 -flto -fuse-linker-plugin \
+        -nostdlib -Wl,-e,_entry probe.c -o probe.elf -lgcc
+    "${prefix}objdump" -f "${dir}/probe.elf" | grep -q "elf32-sh" \
+        || die "probe.elf is not an SH ELF"
+    "${prefix}nm" "${dir}/probe.elf" | grep -q "divsi3" \
+        || die "libgcc was not linked (no divide routine)"
+    log "verified: $("${prefix}gcc" -dumpversion) targets ${SH2_TARGET} (${SH2_TARGET_CPU}), LTO + libgcc OK"
+}
+
+# ── build-sh2-windows ───────────────────────────────────────────────────────
+# The Windows bundle is SGDK's own Windows build, which has no SH-2 compiler.
+# This builds one for Windows ON LINUX (a "Canadian cross": built here, runs
+# on Windows, makes SH-2 code) with the MinGW-w64 compiler, into its own
+# stage. libgcc is SH-2 code, the same whatever runs the compiler, so it is
+# copied from the Linux build (build-sh2) instead of being built twice.
+# Like package-windows, nothing here can run on Linux: the Windows CI job
+# test-compiles with it.
+readonly MINGW_HOST="x86_64-w64-mingw32"
+
+step_build_sh2_windows() {
+    require_tools make tar makeinfo "${MINGW_HOST}-gcc" "${MINGW_HOST}-g++"
+    [[ "${HOST_OS}" == "linux" ]] || die "build-sh2-windows runs on Linux only"
+    is_done gcc-sh2 || die "run build-sh2 first (its libgcc and assembler are needed)"
+    prepare_compiler_sources
+    # Windows programs that need no MinGW DLLs beside them.
+    export LDFLAGS="-static -static-libgcc -static-libstdc++"
+    local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
+    local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}"
+    local stage="${WORK_DIR}/stage/windows-x64-sh2"
+
+    if ! is_done binutils-sh2-windows; then
+        log "binutils ${BINUTILS_VERSION} -> ${SH2_TARGET}, for Windows"
+        local bu_build="${BUILD_DIR}/binutils-sh2-windows"
+        rm -rf "${bu_build}"
+        mkdir -p "${bu_build}"
+        run_logged binutils-sh2-windows-configure "${bu_build}" "${bu_src}/configure" \
+            --host="${MINGW_HOST}" \
+            --target="${SH2_TARGET}" \
+            --prefix="${stage}" \
+            --disable-nls \
+            --disable-werror \
+            --disable-gdb --disable-gprofng
+        run_logged binutils-sh2-windows-make    "${bu_build}" make -j"${JOBS}"
+        run_logged binutils-sh2-windows-install "${bu_build}" make install
+        mark_done binutils-sh2-windows
+    fi
+
+    if ! is_done gcc-sh2-windows; then
+        log "gcc ${GCC_VERSION} -> ${SH2_TARGET}, for Windows"
+        local gcc_build="${BUILD_DIR}/gcc-sh2-windows"
+        rm -rf "${gcc_build}"
+        mkdir -p "${gcc_build}"
+        run_logged gcc-sh2-windows-configure "${gcc_build}" "${gcc_src}/configure" \
+            --host="${MINGW_HOST}" \
+            "${SH2_GCC_CONFIGURE_FLAGS[@]}" \
+            --prefix="${stage}"
+        run_logged gcc-sh2-windows-make    "${gcc_build}" make -j"${JOBS}" all-gcc
+        run_logged gcc-sh2-windows-install "${gcc_build}" make install-gcc
+        # libgcc and its headers: SH-2 code, from the Linux build.
+        local libdir="lib/gcc/${SH2_TARGET}/${GCC_VERSION}"
+        mkdir -p "${stage}/${libdir}"
+        cp -R "${STAGE_DIR}/${libdir}/." "${stage}/${libdir}/"
+        rm -rf "${stage}/share"   # manual pages only
+        mark_done gcc-sh2-windows
+    fi
+    [[ -f "${stage}/bin/${SH2_TARGET}-gcc.exe" && -f "${stage}/lib/gcc/${SH2_TARGET}/${GCC_VERSION}/libgcc.a" ]] \
+        || die "the Windows SH-2 compiler is incomplete in ${stage}"
+    log "build-sh2-windows finished: ${stage} (NOT test-run; the Windows CI job does that)"
 }
 
 # ── build-sgdk ──────────────────────────────────────────────────────────────
@@ -484,11 +647,12 @@ java_exe_for() {
     esac
 }
 
-# write_manifest <bundle folder> <host> <compiler bin dir> <tool prefix> <java exe>
+# write_manifest <bundle folder> <host> <compiler bin dir> <tool prefix> <java exe> <SH-2 bin dir>
 # Writes toolchain.json: the editor's map of this bundle. Every path is
 # relative to the bundle folder and uses forward slashes on every OS.
+# "sh2" is the 32X's compiler (SH2_TARGET- tools in its binDir).
 write_manifest() {
-    local root="$1" host="$2" gcc_bin="$3" prefix="$4" java_exe="$5"
+    local root="$1" host="$2" gcc_bin="$3" prefix="$4" java_exe="$5" sh2_bin="$6"
     cat > "${root}/toolchain.json" <<MANIFEST
 {
   "schema": ${TOOLCHAIN_MANIFEST_SCHEMA},
@@ -497,6 +661,8 @@ write_manifest() {
   "sgdk": { "version": "${SGDK_TAG#v}", "dir": "sgdk" },
   "gcc":  { "version": "${GCC_VERSION}", "binDir": "${gcc_bin}", "prefix": "${prefix}",
             "target": "${TARGET}", "cpu": "${TARGET_CPU}" },
+  "sh2":  { "version": "${GCC_VERSION}", "binDir": "${sh2_bin}", "prefix": "${SH2_TARGET}-",
+            "target": "${SH2_TARGET}", "cpu": "${SH2_TARGET_CPU}" },
   "java": { "version": "${JRE_VERSION}", "exe": "${java_exe}" }
 }
 MANIFEST
@@ -522,6 +688,15 @@ verify_bundle() {
             || die "bundle GCC resolves ${query} to '${found}', which is outside the bundle"
     done
     log "verified: bundle GCC finds its own files inside the bundle"
+    local sh2_gcc="${root}/gcc/bin/${SH2_TARGET}-gcc"
+    for query in -print-libgcc-file-name -print-prog-name=cc1 \
+                 -print-prog-name=ld -print-prog-name=lto-wrapper; do
+        found="$("${sh2_gcc}" "${query}")"
+        [[ "${found}" == "${root}/"* ]] \
+            || die "bundle SH-2 GCC resolves ${query} to '${found}', which is outside the bundle"
+    done
+    verify_sh2_gcc "${root}/gcc/bin/${SH2_TARGET}-"
+    log "verified: bundle SH-2 GCC finds its own files inside the bundle"
 
     local java_exe java_bin_dir make_dir
     java_exe="$(java_exe_for "${host}")"
@@ -548,6 +723,7 @@ step_package() {
     require_tools tar xz
     local host="${HOST_OS}-${HOST_ARCH}"
     is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
+    is_done gcc-sh2 || die "no SH-2 compiler yet; run build-sh2 first"
     step_fetch
 
     local name root entry
@@ -566,7 +742,7 @@ step_package() {
     unpack_jre "${host}" "${root}"
     local java_exe
     java_exe="$(java_exe_for "${host}")"
-    write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}"
+    write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}" "gcc/bin"
     verify_bundle "${root}" "${host}"
     log "bundle folder ready: work/bundle/${name}"
 
@@ -603,11 +779,14 @@ step_package_windows() {
     for item in "${SGDK_STAGE_ITEMS[@]}" bin lib; do
         cp -R "${sgdk_src}/${item}" "${root}/sgdk/"
     done
+    # The 32X's SH-2 compiler, built for Windows here (build-sh2-windows).
+    is_done gcc-sh2-windows || die "no Windows SH-2 compiler yet; run build-sh2-windows first"
+    cp -R "${WORK_DIR}/stage/windows-x64-sh2" "${root}/sh2"
     unpack_jre "${host}" "${root}"
     local java_exe
     java_exe="$(java_exe_for "${host}")"
     # SGDK's Windows compiler lives in sgdk/bin and its tools have no prefix.
-    write_manifest "${root}" "${host}" "sgdk/bin" "" "${java_exe}"
+    write_manifest "${root}" "${host}" "sgdk/bin" "" "${java_exe}" "sh2/bin"
     log "bundle folder ready: work/bundle/${name}"
 
     mkdir -p "${OUT_DIR}"
@@ -635,11 +814,13 @@ main() {
     case "${step}" in
         fetch)           step_fetch "$@" ;;
         build-gcc)       step_build_gcc "$@" ;;
+        build-sh2)       step_build_sh2 "$@" ;;
+        build-sh2-windows) step_build_sh2_windows "$@" ;;
         build-sgdk)      step_build_sgdk "$@" ;;
         package)         step_package ;;
         package-windows) step_package_windows ;;
         clean)           step_clean ;;
-        *)               die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sgdk | package | package-windows | clean" ;;
+        *)               die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sh2 | build-sh2-windows | build-sgdk | package | package-windows | clean" ;;
     esac
 }
 
