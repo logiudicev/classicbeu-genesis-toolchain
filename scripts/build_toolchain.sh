@@ -439,6 +439,7 @@ step_build_sh2_windows() {
             --host="${MINGW_HOST}" \
             --target="${SH2_TARGET}" \
             --prefix="${stage}" \
+            --enable-plugins \
             --disable-nls \
             --disable-werror \
             --disable-gdb --disable-gprofng
@@ -452,7 +453,10 @@ step_build_sh2_windows() {
         local gcc_build="${BUILD_DIR}/gcc-sh2-windows"
         rm -rf "${gcc_build}"
         mkdir -p "${gcc_build}"
-        run_logged gcc-sh2-windows-configure "${gcc_build}" "${gcc_src}/configure" \
+        # GCC asks the linker whether it takes plugins (LTO), but a Windows
+        # linker can't run here; the answer is yes (binutils above has
+        # --enable-plugins), so it is given: 2 = the plugin, with -fuse-linker-plugin.
+        run_logged gcc-sh2-windows-configure "${gcc_build}" env gcc_cv_lto_plugin=2 "${gcc_src}/configure" \
             --host="${MINGW_HOST}" \
             "${SH2_GCC_CONFIGURE_FLAGS[@]}" \
             --prefix="${stage}"
