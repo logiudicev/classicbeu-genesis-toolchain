@@ -650,13 +650,16 @@ step_build_dc() {
 
     if ! is_done dc-gcc2; then
         log "gcc ${GCC_VERSION} -> ${DC_TARGET}, pass 2 (C, C++, KallistiOS threads); the slow one"
+        # --disable-libcc1: GDB's "compile" plugin, which no game needs; with
+        # C++ on it is built, and macOS's libc++ headers trip GCC's poisoned
+        # identifiers in it.
         local b="${BUILD_DIR}/dc-gcc2"
         rm -rf "${b}"; mkdir -p "${b}"
         run_logged dc-gcc2-configure "${b}" "${gcc_src}/configure" \
             --target="${DC_TARGET}" --prefix="${cc}" "${DC_CPU_FLAGS[@]}" \
             --with-gnu-as --with-gnu-ld --with-newlib --disable-libssp \
             --enable-threads=kos --enable-languages=c,c++ --enable-checking=release \
-            --with-libstdcxx-zoneinfo=no --disable-nls --disable-werror ${HOST_CONFIGURE_FLAGS}
+            --with-libstdcxx-zoneinfo=no --disable-nls --disable-werror --disable-libcc1 ${HOST_CONFIGURE_FLAGS}
         run_logged dc-gcc2-make    "${b}" make -j"${JOBS}"
         run_logged dc-gcc2-install "${b}" make install
         rm -rf "${cc}/share"   # manual pages only
