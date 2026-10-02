@@ -661,13 +661,19 @@ step_build_dc() {
     fi
 
     if ! is_done dc-kos; then
-        log "KallistiOS (${KOS_COMMIT:0:7}), its addons and makeip"
-        run_logged dc-kos        "${kos}"                dc_env "${stage}" make
-        run_logged dc-kos-addons "${kos}/addons"         dc_env "${stage}" make
+        # Its kernel (libkallisti) and addons, and the host tools a game's
+        # build uses: genromfs (romdisks) and makeip (below). Not its other
+        # utils (image converters and the like, needing libjpeg/libpng):
+        # KallistiOS's top-level make would build those first.
+        log "KallistiOS (${KOS_COMMIT:0:7}): kernel, addons, genromfs, makeip"
+        run_logged dc-kos-genromfs "${kos}/utils/genromfs" dc_env "${stage}" make
+        run_logged dc-kos          "${kos}/kernel"         dc_env "${stage}" make
+        run_logged dc-kos-addons   "${kos}/addons"         dc_env "${stage}" make
+        [[ -f "${kos}/lib/dreamcast/libkallisti.a" ]] || die "KallistiOS's kernel did not build (no lib/dreamcast/libkallisti.a)"
         # makeip makes a disc's boot sector (IP.BIN) with its own
         # copyright-free bootstrap (utils/makeip/README.md); no Sega code.
         # Built without libpng (KOS_PATCHES): it takes boot logos as MR images.
-        run_logged dc-makeip     "${kos}/utils/makeip"   dc_env "${stage}" make
+        run_logged dc-makeip       "${kos}/utils/makeip"   dc_env "${stage}" make
         [[ -x "${kos}/utils/makeip/makeip" ]] || die "makeip did not build"
         mark_done dc-kos
     fi
@@ -698,9 +704,13 @@ PROBE
     run_logged verify-dc-c   "${dir}" dc_env "${root}" kos-cc  -o probe.elf  probe.c
     run_logged verify-dc-cpp "${dir}" dc_env "${root}" kos-c++ -o probe2.elf probe.cpp
     local objdump="${root}/${DC_TARGET}/bin/${DC_TARGET}-objdump" nm="${root}/${DC_TARGET}/bin/${DC_TARGET}-nm" f
+    # Written to files first: grep -q stops reading early, and with
+    # pipefail nm's big output would then fail the pipe.
     for f in probe.elf probe2.elf; do
-        "${objdump}" -f "${dir}/${f}" | grep -q "elf32-shl" || die "${f} is not a little-endian SH ELF"
-        "${nm}" "${dir}/${f}" | grep -q "arch_main" || die "${f} was not linked with KallistiOS"
+        "${objdump}" -f "${dir}/${f}" > "${dir}/${f}.head"
+        "${nm}" "${dir}/${f}" > "${dir}/${f}.nm"
+        grep -q "elf32-shl" "${dir}/${f}.head" || die "${f} is not a little-endian SH ELF"
+        grep -q "arch_main" "${dir}/${f}.nm" || die "${f} was not linked with KallistiOS"
     done
     run_logged verify-dc-makeip "${dir}" "${root}/kos/utils/makeip/makeip" -g PROBE -f IP.BIN
     local size magic
