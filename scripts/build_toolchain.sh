@@ -570,7 +570,7 @@ step_build_dc() {
         # first, so its headers are there for newlib and GCC pass 2.
         rm -rf "${stage}"
         mkdir -p "${stage}"
-        cp -R "${SRC_DIR}/${KOS_TOP_DIR}" "${kos}"
+        cp -pR "${SRC_DIR}/${KOS_TOP_DIR}" "${kos}"
         # Our fixes to it (KOS_PATCHES in versions.env); the count check
         # keeps an empty list safe on bash 3.2.
         if (( ${#KOS_PATCHES[@]} > 0 )); then
@@ -579,9 +579,12 @@ step_build_dc() {
         write_dc_environ "${stage}"
         # GCC with KallistiOS's thread model: a copy of the (already patched,
         # prerequisites in) GCC source, so the other compilers' stays as is.
+        # -p keeps the files' times: without it a generated file (mpfr's
+        # configure) can look older than its source, and make tries to
+        # remake it with autotools, which fails.
         log "GCC and newlib sources with KallistiOS's patches"
         rm -rf "${gcc_src}"
-        cp -R "${SRC_DIR}/gcc-${GCC_VERSION}" "${gcc_src}"
+        cp -pR "${SRC_DIR}/gcc-${GCC_VERSION}" "${gcc_src}"
         cp "${patches}/gcc/gthr-kos.h" "${gcc_src}/libgcc/gthr-kos.h"
         cp "${patches}/gcc/fake-kos.c" "${gcc_src}/libgcc/config/fake-kos.c"
         patch -p1 -N -s -d "${gcc_src}" < "${patches}/targets/${KOS_GCC_PATCH}" \
