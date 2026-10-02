@@ -2,11 +2,13 @@
 # build_toolchain.sh -- builds the ClassicBEU Genesis toolchain bundle.
 #
 # Usage:
-#   scripts/build_toolchain.sh fetch [--record]  download + verify the pinned sources
+#   scripts/build_toolchain.sh fetch [--record | --record-missing]
+#                                                download + verify the pinned sources
 #   scripts/build_toolchain.sh build-gcc         build binutils + GCC for the 68000
 #   scripts/build_toolchain.sh build-sh2         build binutils + GCC for the 32X's SH-2s
 #   scripts/build_toolchain.sh build-sh2-windows the SH-2 compiler for Windows (needs build-sh2)
 #   scripts/build_toolchain.sh build-sgdk        build SGDK's tools + library, then a test ROM
+#   scripts/build_toolchain.sh build-dc          build the Dreamcast's SH-4 compiler + KallistiOS
 #   scripts/build_toolchain.sh package           bundle this machine's toolchain into out/
 #   scripts/build_toolchain.sh package-windows   repack SGDK's Windows build into out/
 #   scripts/build_toolchain.sh clean             delete work/ except downloads
@@ -155,11 +157,12 @@ download() {
 }
 
 step_fetch() {
-    local record=0 arg
+    local record=0 missing=0 arg
     for arg in "$@"; do
         case "${arg}" in
-            --record) record=1 ;;
-            *)        die "unknown option for fetch: ${arg}" ;;
+            --record)         record=1 ;;
+            --record-missing) missing=1 ;;
+            *)                die "unknown option for fetch: ${arg}" ;;
         esac
     done
 
@@ -180,6 +183,15 @@ step_fetch() {
 
     [[ -f "${CHECKSUMS_FILE}" ]] || die "no checksums.sha256 yet; run 'fetch --record' once"
     local f
+    if (( missing )); then
+        # Pins only what has no checksum yet (a source added to ARTIFACTS);
+        # every existing pin is kept, and still checked below.
+        for f in "${files[@]}"; do
+            grep -qF "  ${f}" "${CHECKSUMS_FILE}" && continue
+            ( cd "${DOWNLOAD_DIR}" && "${SHA256[@]}" "${f}" ) | tee -a "${CHECKSUMS_FILE}"
+            log "pinned ${f} -- review the line above, then commit checksums.sha256"
+        done
+    fi
     for f in "${files[@]}"; do
         grep -qF "  ${f}" "${CHECKSUMS_FILE}" || die "${f} has no pinned checksum"
     done
@@ -475,6 +487,244 @@ step_build_sh2_windows() {
     log "build-sh2-windows finished: ${stage} (NOT test-run; the Windows CI job does that)"
 }
 
+# ── build-dc ────────────────────────────────────────────────────────────────
+# The Dreamcast: its SH-4 compiler (C and C++) with newlib and KallistiOS's
+# threads, and KallistiOS itself, built the way KallistiOS's kos-chain builds
+# them (binutils, GCC pass 1, newlib, GCC pass 2), from the same GCC and
+# binutils sources as the other compilers. Everything goes in its own stage,
+# the bundle's dreamcast/ folder:
+#   sh-elf/       the compiler (KallistiOS's KOS_CC_BASE)
+#   kos/          KallistiOS, built (KOS_BASE), with makeip for disc images
+#   environ.sh    KallistiOS's environment, wherever the bundle is unpacked
+# Its sh-elf compiler is not the 32X's (same name, another CPU), so the two
+# never share a bin folder.
+dc_stage()   { printf '%s' "${WORK_DIR}/stage/${HOST_OS}-${HOST_ARCH}-dreamcast"; }
+
+# write_dc_environ <dreamcast folder>
+# KallistiOS's environ.sh for this bundle (its doc/environ.sh.sample, filled
+# in). It finds the bundle through RGS_DREAMCAST_DIR, which whoever sources
+# it sets to the dreamcast/ folder (the editor does), so the bundle works
+# wherever it is unpacked.
+write_dc_environ() {
+    cat > "$1/environ.sh" <<ENVIRON
+# KallistiOS's environment for this toolchain bundle (written by
+# classicbeu-genesis-toolchain's build-dc). Set RGS_DREAMCAST_DIR to this
+# folder, then source this file:
+#   RGS_DREAMCAST_DIR=/path/to/bundle/dreamcast . /path/to/bundle/dreamcast/environ.sh
+if [ -z "\${RGS_DREAMCAST_DIR:-}" ]; then
+    echo "environ.sh: set RGS_DREAMCAST_DIR to the bundle's dreamcast folder first" >&2
+    return 1 2>/dev/null || exit 1
+fi
+export KOS_ARCH="dreamcast"
+export KOS_BASE="\${RGS_DREAMCAST_DIR}/kos"
+export KOS_PORTS="\${RGS_DREAMCAST_DIR}/kos-ports"
+export KOS_CC_BASE="\${RGS_DREAMCAST_DIR}/${DC_TARGET}"
+export KOS_CC_PREFIX="${DC_TARGET}"
+export DC_ARM_BASE="\${RGS_DREAMCAST_DIR}/arm-eabi"
+export DC_ARM_PREFIX="arm-eabi"
+export DC_TOOLS_BASE="\${RGS_DREAMCAST_DIR}/bin"
+export KOS_CMAKE_TOOLCHAIN="\${KOS_BASE}/utils/cmake/kallistios.toolchain.cmake"
+export KOS_GENROMFS="\${KOS_BASE}/utils/genromfs/genromfs"
+export KOS_MAKE="make"
+export KOS_LOADER="dc-tool -x"
+export KOS_INC_PATHS=""
+export KOS_CPPFLAGS=""
+export KOS_LDFLAGS=""
+export KOS_AFLAGS=""
+export DC_ARM_LDFLAGS=""
+export KOS_CFLAGS="-O2 -fno-PIC -fno-PIE -fomit-frame-pointer"
+export KOS_SH4_PRECISION="${DC_SH4_PRECISION}"
+. "\${KOS_BASE}/environ_base.sh"
+ENVIRON
+}
+
+# dc_env <dreamcast folder> <command...>: runs it with KallistiOS's
+# environment, and without the host compiler flags the GCC steps export
+# (KallistiOS's makefiles have their own).
+dc_env() {
+    local dir="$1"
+    shift
+    env -u CFLAGS -u CXXFLAGS -u LDFLAGS RGS_DREAMCAST_DIR="${dir}" \
+        sh -c '. "${RGS_DREAMCAST_DIR}/environ.sh" && exec "$@"' dc_env "$@"
+}
+
+step_build_dc() {
+    require_tools make cc c++ tar makeinfo patch
+    prepare_compiler_sources
+    local stage cc kos
+    stage="$(dc_stage)"
+    cc="${stage}/${DC_TARGET}"
+    kos="${stage}/kos"
+    # This compiler first: the 32X's sh-elf tools (on PATH from
+    # prepare_compiler_sources) have the same names.
+    export PATH="${cc}/bin:${PATH}"
+    local bu_src="${SRC_DIR}/binutils-${BINUTILS_VERSION}"
+    local gcc_src="${SRC_DIR}/gcc-${GCC_VERSION}-kos"
+    local nl_src="${SRC_DIR}/${NEWLIB_TOP_DIR}"
+    local patches="${SRC_DIR}/${KOS_TOP_DIR}/utils/kos-chain/patches"
+
+    if ! is_done dc-sources; then
+        extract "${KOS_FILE}"    "${KOS_TOP_DIR}"
+        extract "${NEWLIB_FILE}" "${NEWLIB_TOP_DIR}"
+        # KallistiOS is built where it is installed: copied into the stage
+        # first, so its headers are there for newlib and GCC pass 2.
+        rm -rf "${stage}"
+        mkdir -p "${stage}"
+        cp -R "${SRC_DIR}/${KOS_TOP_DIR}" "${kos}"
+        # Our fixes to it (KOS_PATCHES in versions.env); the count check
+        # keeps an empty list safe on bash 3.2.
+        if (( ${#KOS_PATCHES[@]} > 0 )); then
+            apply_patches "${kos}" "${KOS_PATCHES[@]}"
+        fi
+        write_dc_environ "${stage}"
+        # GCC with KallistiOS's thread model: a copy of the (already patched,
+        # prerequisites in) GCC source, so the other compilers' stays as is.
+        log "GCC and newlib sources with KallistiOS's patches"
+        rm -rf "${gcc_src}"
+        cp -R "${SRC_DIR}/gcc-${GCC_VERSION}" "${gcc_src}"
+        cp "${patches}/gcc/gthr-kos.h" "${gcc_src}/libgcc/gthr-kos.h"
+        cp "${patches}/gcc/fake-kos.c" "${gcc_src}/libgcc/config/fake-kos.c"
+        patch -p1 -N -s -d "${gcc_src}" < "${patches}/targets/${KOS_GCC_PATCH}" \
+            || die "KallistiOS's ${KOS_GCC_PATCH} did not apply"
+        # newlib with KallistiOS's locks and syscalls.
+        mkdir -p "${nl_src}/newlib/libc/machine/sh/sys"
+        cp "${kos}/include/sys/lock.h" "${nl_src}/newlib/libc/machine/sh/sys/lock.h"
+        cp "${kos}/include/sys/lock.h" "${nl_src}/newlib/libc/include/sys/lock.h"
+        patch -p1 -N -s -d "${nl_src}" < "${patches}/targets/${KOS_NEWLIB_PATCH}" \
+            || die "KallistiOS's ${KOS_NEWLIB_PATCH} did not apply"
+        mark_done dc-sources
+    fi
+
+    if ! is_done dc-binutils; then
+        log "binutils ${BINUTILS_VERSION} -> ${DC_TARGET} (Dreamcast)"
+        local b="${BUILD_DIR}/dc-binutils"
+        rm -rf "${b}"; mkdir -p "${b}"
+        # HOST_CONFIGURE_FLAGS is deliberately unquoted (see build-gcc).
+        run_logged dc-binutils-configure "${b}" "${bu_src}/configure" \
+            --target="${DC_TARGET}" --prefix="${cc}" \
+            --disable-nls --disable-werror ${HOST_CONFIGURE_FLAGS}
+        run_logged dc-binutils-make    "${b}" make -j"${JOBS}"
+        run_logged dc-binutils-install "${b}" make install
+        mark_done dc-binutils
+    fi
+
+    if ! is_done dc-gcc1; then
+        log "gcc ${GCC_VERSION} -> ${DC_TARGET}, pass 1 (C, for newlib)"
+        local b="${BUILD_DIR}/dc-gcc1"
+        rm -rf "${b}"; mkdir -p "${b}"
+        run_logged dc-gcc1-configure "${b}" "${gcc_src}/configure" \
+            --target="${DC_TARGET}" --prefix="${cc}" "${DC_CPU_FLAGS[@]}" \
+            --with-gnu-as --with-gnu-ld --without-headers --with-newlib \
+            --enable-languages=c --disable-libssp --enable-checking=release \
+            --disable-nls --disable-werror ${HOST_CONFIGURE_FLAGS}
+        run_logged dc-gcc1-make    "${b}" make -j"${JOBS}" all-gcc all-target-libgcc
+        run_logged dc-gcc1-install "${b}" make install-gcc install-target-libgcc
+        mark_done dc-gcc1
+    fi
+
+    if ! is_done dc-newlib; then
+        log "newlib ${NEWLIB_VERSION} -> ${DC_TARGET}"
+        local b="${BUILD_DIR}/dc-newlib"
+        rm -rf "${b}"; mkdir -p "${b}"
+        run_logged dc-newlib-configure "${b}" "${nl_src}/configure" \
+            --target="${DC_TARGET}" --prefix="${cc}" "${DC_CPU_FLAGS[@]}" \
+            --disable-newlib-supplied-syscalls --enable-newlib-io-c99-formats
+        run_logged dc-newlib-make    "${b}" make -j"${JOBS}"
+        run_logged dc-newlib-install "${b}" make install
+        # KallistiOS's fix-ups to newlib's headers (kos-chain's
+        # fixup-newlib): its pthreads, dirent and timers, and its own
+        # headers as <kos/...>. The link is relative, so it moves with the bundle.
+        local inc="${cc}/${DC_TARGET}/include"
+        mkdir -p "${inc}/sys" "${inc}/machine"
+        cp "${kos}/include/pthread.h"           "${inc}/"
+        cp "${kos}/include/sys/_pthreadtypes.h" "${inc}/sys/"
+        cp "${kos}/include/sys/dirent.h"        "${inc}/sys/"
+        cp "${kos}/include/machine/time.h"      "${inc}/machine/"
+        ln -nsf "../../../kos/include/kos" "${inc}/kos"
+        [[ -f "${inc}/kos/thread.h" ]] || die "newlib's kos/ link does not reach KallistiOS's headers"
+        mark_done dc-newlib
+    fi
+
+    if ! is_done dc-gcc2; then
+        log "gcc ${GCC_VERSION} -> ${DC_TARGET}, pass 2 (C, C++, KallistiOS threads); the slow one"
+        local b="${BUILD_DIR}/dc-gcc2"
+        rm -rf "${b}"; mkdir -p "${b}"
+        run_logged dc-gcc2-configure "${b}" "${gcc_src}/configure" \
+            --target="${DC_TARGET}" --prefix="${cc}" "${DC_CPU_FLAGS[@]}" \
+            --with-gnu-as --with-gnu-ld --with-newlib --disable-libssp \
+            --enable-threads=kos --enable-languages=c,c++ --enable-checking=release \
+            --with-libstdcxx-zoneinfo=no --disable-nls --disable-werror ${HOST_CONFIGURE_FLAGS}
+        run_logged dc-gcc2-make    "${b}" make -j"${JOBS}"
+        run_logged dc-gcc2-install "${b}" make install
+        rm -rf "${cc}/share"   # manual pages only
+        mark_done dc-gcc2
+    fi
+
+    if ! is_done dc-kos; then
+        # Its kernel (libkallisti) and addons, and the host tools a game's
+        # build uses: genromfs (romdisks) and makeip (below). Not its other
+        # utils (image converters and the like, needing libjpeg/libpng):
+        # KallistiOS's top-level make would build those first.
+        log "KallistiOS (${KOS_COMMIT:0:7}): kernel, addons, genromfs, makeip"
+        run_logged dc-kos-genromfs "${kos}/utils/genromfs" dc_env "${stage}" make
+        run_logged dc-kos          "${kos}/kernel"         dc_env "${stage}" make
+        run_logged dc-kos-addons   "${kos}/addons"         dc_env "${stage}" make
+        [[ -f "${kos}/lib/dreamcast/libkallisti.a" ]] || die "KallistiOS's kernel did not build (no lib/dreamcast/libkallisti.a)"
+        # makeip makes a disc's boot sector (IP.BIN) with its own
+        # copyright-free bootstrap (utils/makeip/README.md); no Sega code.
+        # Built without libpng (KOS_PATCHES): it takes boot logos as MR images.
+        run_logged dc-makeip       "${kos}/utils/makeip"   dc_env "${stage}" make
+        [[ -x "${kos}/utils/makeip/makeip" ]] || die "makeip did not build"
+        mark_done dc-kos
+    fi
+
+    verify_dc "${stage}"
+    log "build-dc finished: ${stage}"
+}
+
+# verify_dc <dreamcast folder>
+# Proves the Dreamcast toolchain works through KallistiOS's own wrappers, as
+# a game is built: a C and a C++ program link against KallistiOS into
+# little-endian SH ELFs, and makeip makes a boot sector.
+verify_dc() {
+    local root="$1"
+    local dir="${WORK_DIR}/verify-dc"
+    rm -rf "${dir}"
+    mkdir -p "${dir}"
+    cat > "${dir}/probe.c" <<'PROBE'
+#include <kos.h>
+int main(int argc, char** argv) { (void) argc; (void) argv; printf("probe %d\n", (int) thd_get_current()->tid); return 0; }
+PROBE
+    cat > "${dir}/probe.cpp" <<'PROBE'
+#include <kos.h>
+#include <string>
+#include <vector>
+int main() { std::vector<std::string> v{ "probe" }; printf("%s\n", v[0].c_str()); return 0; }
+PROBE
+    run_logged verify-dc-c   "${dir}" dc_env "${root}" kos-cc  -o probe.elf  probe.c
+    run_logged verify-dc-cpp "${dir}" dc_env "${root}" kos-c++ -o probe2.elf probe.cpp
+    local objdump="${root}/${DC_TARGET}/bin/${DC_TARGET}-objdump" nm="${root}/${DC_TARGET}/bin/${DC_TARGET}-nm" f
+    # Written to files first: grep -q stops reading early, and with
+    # pipefail nm's big output would then fail the pipe.
+    for f in probe.elf probe2.elf; do
+        "${objdump}" -f "${dir}/${f}" > "${dir}/${f}.head"
+        "${nm}" "${dir}/${f}" > "${dir}/${f}.nm"
+        grep -q "elf32-shl" "${dir}/${f}.head" || die "${f} is not a little-endian SH ELF"
+        grep -q "arch_main" "${dir}/${f}.nm" || die "${f} was not linked with KallistiOS"
+    done
+    run_logged verify-dc-makeip "${dir}" "${root}/kos/utils/makeip/makeip" -g PROBE -f IP.BIN
+    local size magic
+    size="$(wc -c < "${dir}/IP.BIN" | tr -d ' ')"
+    magic="$(dd if="${dir}/IP.BIN" bs=1 count=15 2>/dev/null)"
+    [[ "${size}" == "${DC_IP_BIN_SIZE}" && "${magic}" == "${DC_IP_HARDWARE_ID}" ]] \
+        || die "makeip's IP.BIN is ${size} bytes starting '${magic}'"
+    log "verified: Dreamcast C and C++ programs link with KallistiOS; makeip makes IP.BIN"
+}
+
+# A Dreamcast boot sector: 16 sectors of 2048 bytes, starting with this.
+readonly DC_IP_BIN_SIZE=32768
+readonly DC_IP_HARDWARE_ID="SEGA SEGAKATANA"
+
 # ── build-sgdk ──────────────────────────────────────────────────────────────
 # What goes into the bundle from the SGDK source tree. Deliberately left out:
 # Windows .exe/.dll files, the prebuilt Windows lib/ (we rebuild it), samples,
@@ -652,12 +902,18 @@ java_exe_for() {
     esac
 }
 
-# write_manifest <bundle folder> <host> <compiler bin dir> <tool prefix> <java exe> <SH-2 bin dir>
+# write_manifest <bundle folder> <host> <compiler bin dir> <tool prefix> <java exe> <SH-2 bin dir> [<Dreamcast dir>]
 # Writes toolchain.json: the editor's map of this bundle. Every path is
 # relative to the bundle folder and uses forward slashes on every OS.
 # "sh2" is the 32X's compiler (SH2_TARGET- tools in its binDir).
+# "dreamcast" (when the bundle has it) is KallistiOS and its compiler:
+# environ.sh is sourced with RGS_DREAMCAST_DIR set to its dir.
 write_manifest() {
-    local root="$1" host="$2" gcc_bin="$3" prefix="$4" java_exe="$5" sh2_bin="$6"
+    local root="$1" host="$2" gcc_bin="$3" prefix="$4" java_exe="$5" sh2_bin="$6" dc_dir="${7:-}"
+    local dc=""
+    [[ -n "${dc_dir}" ]] && dc=",
+  \"dreamcast\": { \"dir\": \"${dc_dir}\", \"environ\": \"${dc_dir}/environ.sh\", \"kos\": \"${KOS_COMMIT}\",
+                 \"gcc\": \"${GCC_VERSION}\", \"newlib\": \"${NEWLIB_VERSION}\", \"makeip\": \"${dc_dir}/kos/utils/makeip/makeip\" }"
     cat > "${root}/toolchain.json" <<MANIFEST
 {
   "schema": ${TOOLCHAIN_MANIFEST_SCHEMA},
@@ -668,7 +924,7 @@ write_manifest() {
             "target": "${TARGET}", "cpu": "${TARGET_CPU}" },
   "sh2":  { "version": "${GCC_VERSION}", "binDir": "${sh2_bin}", "prefix": "${SH2_TARGET}-",
             "target": "${SH2_TARGET}", "cpu": "${SH2_TARGET_CPU}" },
-  "java": { "version": "${JRE_VERSION}", "exe": "${java_exe}" }
+  "java": { "version": "${JRE_VERSION}", "exe": "${java_exe}" }${dc}
 }
 MANIFEST
 }
@@ -702,6 +958,15 @@ verify_bundle() {
     done
     verify_sh2_gcc "${root}/gcc/bin/${SH2_TARGET}-"
     log "verified: bundle SH-2 GCC finds its own files inside the bundle"
+    local dc_gcc="${root}/dreamcast/${DC_TARGET}/bin/${DC_TARGET}-gcc"
+    for query in -print-libgcc-file-name -print-prog-name=cc1 -print-prog-name=cc1plus \
+                 -print-prog-name=ld -print-file-name=libc.a -print-file-name=libstdc++.a; do
+        found="$("${dc_gcc}" "${query}")"
+        [[ "${found}" == "${root}/"* ]] \
+            || die "bundle Dreamcast GCC resolves ${query} to '${found}', which is outside the bundle"
+    done
+    verify_dc "${root}/dreamcast"
+    log "verified: bundle Dreamcast GCC and KallistiOS work from inside the bundle"
 
     local java_exe java_bin_dir make_dir
     java_exe="$(java_exe_for "${host}")"
@@ -729,6 +994,7 @@ step_package() {
     local host="${HOST_OS}-${HOST_ARCH}"
     is_done sgdk || die "nothing to package yet; run build-gcc and build-sgdk first"
     is_done gcc-sh2 || die "no SH-2 compiler yet; run build-sh2 first"
+    is_done dc-kos || die "no Dreamcast toolchain yet; run build-dc first"
     step_fetch
 
     local name root entry
@@ -744,10 +1010,12 @@ step_package() {
     done
     rm -rf "${root}/gcc/share"   # manual pages only; not needed to compile
     cp -R "${STAGE_DIR}/sgdk" "${root}/sgdk"
+    # The Dreamcast's (cp -R keeps newlib's relative kos/ link a link).
+    cp -R "$(dc_stage)" "${root}/dreamcast"
     unpack_jre "${host}" "${root}"
     local java_exe
     java_exe="$(java_exe_for "${host}")"
-    write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}" "gcc/bin"
+    write_manifest "${root}" "${host}" "gcc/bin" "${TARGET}-" "${java_exe}" "gcc/bin" "dreamcast"
     verify_bundle "${root}" "${host}"
     log "bundle folder ready: work/bundle/${name}"
 
@@ -822,10 +1090,11 @@ main() {
         build-sh2)       step_build_sh2 "$@" ;;
         build-sh2-windows) step_build_sh2_windows "$@" ;;
         build-sgdk)      step_build_sgdk "$@" ;;
+        build-dc)        step_build_dc "$@" ;;
         package)         step_package ;;
         package-windows) step_package_windows ;;
         clean)           step_clean ;;
-        *)               die "usage: scripts/build_toolchain.sh fetch [--record] | build-gcc | build-sh2 | build-sh2-windows | build-sgdk | package | package-windows | clean" ;;
+        *)               die "usage: scripts/build_toolchain.sh fetch [--record | --record-missing] | build-gcc | build-sh2 | build-sh2-windows | build-sgdk | build-dc | package | package-windows | clean" ;;
     esac
 }
 
