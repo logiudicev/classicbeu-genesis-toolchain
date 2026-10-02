@@ -92,7 +92,8 @@ jobs:
           mkdir -p out/sources
           cp work/downloads/gcc-*.tar.* work/downloads/binutils-*.tar.* out/sources/
           cp work/downloads/newlib-*.tar.* work/downloads/KallistiOS-*.tar.* out/sources/
-          cp work/src/gcc-*/gmp-*.tar.* work/src/gcc-*/mpfr-*.tar.* work/src/gcc-*/mpc-*.tar.* out/sources/
+          # The GCC tree's own prerequisites (not the Dreamcast copy's, gcc-*-kos: the same files).
+          cp work/src/gcc-*[0-9]/gmp-*.tar.* work/src/gcc-*[0-9]/mpfr-*.tar.* work/src/gcc-*[0-9]/mpc-*.tar.* out/sources/
           ls -l out/sources
 
       - name: Upload the Linux bundle
